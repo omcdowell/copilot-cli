@@ -24,14 +24,32 @@ Scenarios: `officeweb` | `teamshub`
 
 ## Install
 
+Preferred (Astral toolchain — `uv` on your machine, not a project dependency):
+
 ```bash
 cd /home/noble/code/copilot-cli
-python3 -m venv .venv
+uv venv                  # uses .python-version (3.11)
 source .venv/bin/activate
-pip install -e .
+uv pip install -e .
 
 # Node deps for substrate token capture
 cd src/copilot_cli/puppeteer_get_substrate_bearer && npm install && cd -
+```
+
+Plain pip / venv also works (no `uv` required):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Lint / format / typecheck with machine-installed Astral tools (`uv tool install ruff ty`):
+
+```bash
+ruff check src
+ruff format src
+ty check
 ```
 
 Requires Node.js on `PATH` for password-based auth.

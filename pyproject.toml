@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "copilot-cli"
+version = "0.1.0"
+description = "Standalone M365 Copilot CLI — interact with Copilot365 via Office/Teams substrate API"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Extracted from mbrg/power-pwn (Zenity Labs)" }]
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.31.0",
+    "pyjwt>=2.6.0",
+    "websockets>=12.0.0",
+    "Flask>=2.2.5",
+    "typing_extensions>=4.0.0",
+]
+
+[project.scripts]
+copilot-cli = "copilot_cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+copilot_cli = [
+    "puppeteer_get_substrate_bearer/*.js",
+    "puppeteer_get_substrate_bearer/package.json",
+    "puppeteer_get_substrate_bearer/package-lock.json",
+    "puppeteer_get_substrate_bearer/readme.md",
+]
+
+# Astral tooling (machine-installed via `uv tool install`; not project dependencies)
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",  # many long prompt / message strings in this codebase
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.environment]
+python-version = "3.9"
+root = ["./src"]
+
+[tool.ty.src]
+include = ["src"]
