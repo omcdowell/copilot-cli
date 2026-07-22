@@ -1,6 +1,7 @@
 // Description: Open M365 Copilot chat in a persistent Edge profile and capture the Substrate bearer token.
 // Trigger: loading https://m365.cloud.microsoft/chat causes the client to open
-// wss://substrate.../Chathub/...?access_token=<sydney-jwt> — that query param is the token.
+// wss://substrate.../Chathub/...?access_token=<jwt> — that query param is the token —
+// and/or obtain a Bearer token scoped to M365Copilot.Read.All via /oauth2/v2.0/token.
 // Passwords are never accepted: sign in once in the visible Edge window.
 
 const puppeteer = require('puppeteer');
@@ -29,16 +30,21 @@ function logMessage(message) {
   console.error(message);
 }
 
+function isSubstrateChatUrl(url) {
+  return (
+    typeof url === 'string' &&
+    (url.includes('substrate.office.com') ||
+      url.includes('substrate.svc.cloud.microsoft') ||
+      /\/m365Copilot\/Chat[Hh]ub\//i.test(url) ||
+      /\/m365chat\/SecuredChat[Hh]ub\//i.test(url))
+  );
+}
+
 function extractAccessTokenFromUrl(url) {
   if (!url || typeof url !== 'string') {
     return null;
   }
-  const isSubstrate =
-    url.includes('substrate.office.com') ||
-    url.includes('substrate.svc.cloud.microsoft') ||
-    /\/m365Copilot\/Chat[Hh]ub\//i.test(url) ||
-    /\/m365chat\/SecuredChat[Hh]ub\//i.test(url);
-  if (!isSubstrate && !url.includes('access_token=')) {
+  if (!isSubstrateChatUrl(url) && !url.includes('access_token=')) {
     return null;
   }
   let match = url.match(/[?&]access_token=([^&]+)/);
@@ -52,23 +58,23 @@ function extractAccessTokenFromUrl(url) {
   }
 }
 
-function looksLikeSydneyToken(token) {
+function scopeIncludesM365Copilot(scope) {
+  return String(scope || '').includes('M365Copilot.Read.All');
+}
+
+function looksLikeCopilotToken(token) {
   if (!token || typeof token !== 'string' || !token.includes('.')) {
     return false;
   }
   try {
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
-    const aud = payload.aud;
-    if (typeof aud === 'string' && aud.includes('substrate.office.com/sydney')) {
-      return true;
-    }
-    if (Array.isArray(aud) && aud.some(a => String(a).includes('substrate.office.com/sydney'))) {
-      return true;
-    }
-    // Some tokens only expose scp/roles; still accept JWT-shaped tokens from substrate WS.
-    return Boolean(payload.oid && payload.tid);
+    return (
+      scopeIncludesM365Copilot(payload.scp) ||
+      scopeIncludesM365Copilot(payload.roles) ||
+      scopeIncludesM365Copilot(payload.aud)
+    );
   } catch (_) {
-    return token.startsWith('eyJ');
+    return false;
   }
 }
 
@@ -109,13 +115,14 @@ async function waitUntilPastLogin(page, timeoutMs) {
   return false;
 }
 
-async function readSydneyTokenFromStorage(page) {
+async function readCopilotTokenFromStorage(page) {
   return page.evaluate(() => {
+    const SCOPE_MARKER = 'M365Copilot.Read.All';
     const scan = (storage) => {
       try {
         for (const key of Object.keys(storage)) {
           const value = storage.getItem(key);
-          if (!value || !value.includes('substrate.office.com/sydney')) {
+          if (!value || !value.includes(SCOPE_MARKER)) {
             continue;
           }
           try {
@@ -125,7 +132,11 @@ async function readSydneyTokenFromStorage(page) {
             }
             if (Array.isArray(data)) {
               for (const entry of data) {
-                if (entry && typeof entry.secret === 'string' && String(entry.scope || entry.scopes || '').includes('sydney')) {
+                if (
+                  entry &&
+                  typeof entry.secret === 'string' &&
+                  String(entry.scope || entry.scopes || '').includes(SCOPE_MARKER)
+                ) {
                   return entry.secret;
                 }
               }
@@ -173,12 +184,12 @@ async function readSydneyTokenFromStorage(page) {
     tokenCapturedResolver = resolve;
   });
 
-  const acceptToken = (token, source) => {
+  const acceptToken = (token, source, { alreadyValidated = false } = {}) => {
     if (!token || bearerToken) {
       return;
     }
-    if (!looksLikeSydneyToken(token)) {
-      logMessage(`Ignoring non-sydney token candidate from ${source}`);
+    if (!alreadyValidated && !looksLikeCopilotToken(token)) {
+      logMessage(`Ignoring unrelated token candidate from ${source}`);
       return;
     }
     bearerToken = token;
@@ -198,18 +209,18 @@ async function readSydneyTokenFromStorage(page) {
     }
     const token = extractAccessTokenFromUrl(url);
     if (token) {
-      acceptToken(token, 'websocket URL');
+      acceptToken(token, 'websocket URL', { alreadyValidated: isSubstrateChatUrl(url) });
     }
   });
   client.on('Network.webSocketWillSendHandshakeRequest', ({ request }) => {
     const url = request && request.url;
     const token = extractAccessTokenFromUrl(url);
     if (token) {
-      acceptToken(token, 'websocket handshake');
+      acceptToken(token, 'websocket handshake', { alreadyValidated: isSubstrateChatUrl(url) });
     }
   });
 
-  // Secondary: MSAL token endpoint response (older office.com flow).
+  // Secondary: MSAL /oauth2/v2.0/token responses scoped to M365Copilot.Read.All.
   page.on('response', async response => {
     try {
       const url = response.url();
@@ -226,23 +237,20 @@ async function readSydneyTokenFromStorage(page) {
           { encoding: 'utf8' }
         );
       }
-      if (
-        url.includes('/oauth2/v2.0/token') &&
-        (text.includes('"token_type":"Bearer"') || text.includes('"tokenType":"Bearer"')) &&
-        text.includes('sydney')
-      ) {
+      if (url.includes('/oauth2/v2.0/token') && response.ok()) {
+        let json;
         try {
-          const json = JSON.parse(text);
-          if (json.access_token) {
-            acceptToken(json.access_token, 'oauth token response');
-            return;
-          }
+          json = JSON.parse(text);
         } catch (_) {
-          // fall through
+          return;
         }
-        const match = text.match(/"access_token"\s*:\s*"([^"]+)"/);
-        if (match) {
-          acceptToken(match[1], 'oauth token response (regex)');
+        const tokenType = json.token_type || json.tokenType;
+        if (
+          tokenType === 'Bearer' &&
+          json.access_token &&
+          scopeIncludesM365Copilot(json.scope || json.scopes)
+        ) {
+          acceptToken(json.access_token, 'oauth token response', { alreadyValidated: true });
         }
       }
     } catch (err) {
@@ -278,7 +286,7 @@ async function readSydneyTokenFromStorage(page) {
     const deadline = Date.now() + TOKEN_WAIT_MS;
     while (!bearerToken && Date.now() < deadline) {
       try {
-        const fromStorage = await readSydneyTokenFromStorage(page);
+        const fromStorage = await readCopilotTokenFromStorage(page);
         if (fromStorage) {
           acceptToken(fromStorage, 'local/session storage');
           return;
