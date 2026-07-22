@@ -155,21 +155,51 @@ async function waitForTeamsSession(page, timeoutMs) {
 
     await delay(10000);
 
-    const secretValue = await page.evaluate(() => {
+    const captured = await page.evaluate(() => {
         const key = Object.keys(localStorage).find(k => {
             const value = localStorage.getItem(k);
             return value && value.includes('https://substrate.office.com/sydney/.default');
         });
 
-        if (key) {
-            const data = JSON.parse(localStorage.getItem(key));
-            return data.secret;
+        if (!key) {
+            return null;
         }
-        return null;
+        const data = JSON.parse(localStorage.getItem(key));
+        if (!data || typeof data.secret !== 'string') {
+            return null;
+        }
+        let oid = null;
+        let tid = data.realm || null;
+        const homeAccountId = data.homeAccountId;
+        if (typeof homeAccountId === 'string') {
+            const match = homeAccountId.match(/^([0-9a-fA-F-]{36})\.([0-9a-fA-F-]{36})/);
+            if (match) {
+                oid = match[1];
+                tid = tid || match[2];
+            }
+        }
+        return {
+            token: data.secret,
+            oid,
+            tid,
+            user: data.username || null
+        };
     });
 
-    // stdout contract for Python parser — keep this format.
+    // stdout contract for Python parser — access token is opaque; identity is separate.
+    const secretValue = captured && captured.token ? captured.token : null;
     console.log('access_token:%s', secretValue);
+    if (captured && captured.oid) {
+        console.log('oid:%s', captured.oid);
+    }
+    if (captured && captured.tid) {
+        console.log('tid:%s', captured.tid);
+    }
+    if (captured && captured.user) {
+        console.log('user:%s', captured.user);
+    } else if (USER) {
+        console.log('user:%s', USER);
+    }
 
     await browser.close();
 

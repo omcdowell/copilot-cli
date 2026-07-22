@@ -1,7 +1,8 @@
 // Description: Open M365 Copilot chat in a persistent Edge profile and capture the Substrate bearer token.
 // Trigger: loading https://m365.cloud.microsoft/chat causes the client to open
-// wss://substrate.../Chathub/...?access_token=<jwt> — that query param is the token —
+// wss://substrate.../Chathub/...?access_token=<opaque> — that query param is the token —
 // and/or obtain a Bearer token scoped to M365Copilot.Read.All via /oauth2/v2.0/token.
+// Access tokens must be treated as opaque (Microsoft identity platform); never require JWT shape.
 // Passwords are never accepted: sign in once in the visible Edge window.
 
 const puppeteer = require('puppeteer');
@@ -58,24 +59,76 @@ function extractAccessTokenFromUrl(url) {
   }
 }
 
+/** Chathub path is /.../Chathub/{oid}@{tid} — identity for WS URL rebuild without parsing the token. */
+function extractIdentityFromSubstrateUrl(url) {
+  if (!url || typeof url !== 'string') {
+    return null;
+  }
+  const match = url.match(/\/(?:Chat[Hh]ub|SecuredChat[Hh]ub)\/([^@/?#]+)@([^/?#]+)/i);
+  if (!match) {
+    return null;
+  }
+  return { oid: match[1], tid: match[2] };
+}
+
 function scopeIncludesM365Copilot(scope) {
   return String(scope || '').includes('M365Copilot.Read.All');
 }
 
-function looksLikeCopilotToken(token) {
-  if (!token || typeof token !== 'string' || !token.includes('.')) {
-    return false;
+/** Best-effort claims from a JWT-shaped string only. Opaque tokens return null. */
+function tryDecodeJwtPayload(token) {
+  if (!token || typeof token !== 'string') {
+    return null;
+  }
+  const parts = token.split('.');
+  if (parts.length !== 3 || !parts[1]) {
+    return null;
   }
   try {
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
-    return (
-      scopeIncludesM365Copilot(payload.scp) ||
-      scopeIncludesM365Copilot(payload.roles) ||
-      scopeIncludesM365Copilot(payload.aud)
-    );
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
   } catch (_) {
-    return false;
+    return null;
   }
+}
+
+function identityFromHomeAccountId(homeAccountId) {
+  if (!homeAccountId || typeof homeAccountId !== 'string') {
+    return null;
+  }
+  // MSAL: "{oid}.{tid}" or "{oid}.{tid}-login.windows.net"
+  const match = homeAccountId.match(/^([0-9a-fA-F-]{36})\.([0-9a-fA-F-]{36})/);
+  if (!match) {
+    return null;
+  }
+  return { oid: match[1], tid: match[2] };
+}
+
+function mergeIdentity(target, source) {
+  if (!source) {
+    return target;
+  }
+  if (source.oid && !target.oid) {
+    target.oid = source.oid;
+  }
+  if (source.tid && !target.tid) {
+    target.tid = source.tid;
+  }
+  if (source.user && !target.user) {
+    target.user = source.user;
+  }
+  return target;
+}
+
+function identityFromJwtOrIdToken(token) {
+  const payload = tryDecodeJwtPayload(token);
+  if (!payload) {
+    return null;
+  }
+  return {
+    oid: payload.oid || null,
+    tid: payload.tid || null,
+    user: payload.upn || payload.unique_name || payload.preferred_username || null
+  };
 }
 
 async function maybePrefillUsername(page, user) {
@@ -118,6 +171,28 @@ async function waitUntilPastLogin(page, timeoutMs) {
 async function readCopilotTokenFromStorage(page) {
   return page.evaluate(() => {
     const SCOPE_MARKER = 'M365Copilot.Read.All';
+    const identityFromHomeAccountId = (homeAccountId) => {
+      if (!homeAccountId || typeof homeAccountId !== 'string') {
+        return null;
+      }
+      const match = homeAccountId.match(/^([0-9a-fA-F-]{36})\.([0-9a-fA-F-]{36})/);
+      if (!match) {
+        return null;
+      }
+      return { oid: match[1], tid: match[2] };
+    };
+    const fromEntry = (entry) => {
+      if (!entry || typeof entry.secret !== 'string') {
+        return null;
+      }
+      const fromHome = identityFromHomeAccountId(entry.homeAccountId);
+      return {
+        token: entry.secret,
+        oid: (fromHome && fromHome.oid) || null,
+        tid: (fromHome && fromHome.tid) || entry.realm || null,
+        user: entry.username || null
+      };
+    };
     const scan = (storage) => {
       try {
         for (const key of Object.keys(storage)) {
@@ -127,24 +202,28 @@ async function readCopilotTokenFromStorage(page) {
           }
           try {
             const data = JSON.parse(value);
-            if (data && typeof data.secret === 'string') {
-              return data.secret;
+            const single = fromEntry(data);
+            if (single) {
+              return single;
             }
             if (Array.isArray(data)) {
               for (const entry of data) {
                 if (
                   entry &&
                   typeof entry.secret === 'string' &&
-                  String(entry.scope || entry.scopes || '').includes(SCOPE_MARKER)
+                  String(entry.scope || entry.scopes || entry.target || '').includes(SCOPE_MARKER)
                 ) {
-                  return entry.secret;
+                  const found = fromEntry(entry);
+                  if (found) {
+                    return found;
+                  }
                 }
               }
             }
           } catch (_) {
             const match = value.match(/"secret"\s*:\s*"([^"]+)"/);
             if (match) {
-              return match[1];
+              return { token: match[1], oid: null, tid: null, user: null };
             }
           }
         }
@@ -179,18 +258,46 @@ async function readCopilotTokenFromStorage(page) {
   page.setDefaultTimeout(timeout);
 
   let bearerToken = null;
+  const identity = { oid: null, tid: null, user: USER || null };
   let tokenCapturedResolver;
   const tokenCapturedPromise = new Promise(resolve => {
     tokenCapturedResolver = resolve;
   });
 
-  const acceptToken = (token, source, { alreadyValidated = false } = {}) => {
+  const acceptToken = (token, source, { alreadyValidated = false, identityHint = null } = {}) => {
     if (!token || bearerToken) {
       return;
     }
-    if (!alreadyValidated && !looksLikeCopilotToken(token)) {
-      logMessage(`Ignoring unrelated token candidate from ${source}`);
-      return;
+    // Prefer non-token identity sources. Soft-decode JWT-shaped tokens only as a fallback
+    // (access tokens are opaque per Microsoft identity platform guidance).
+    mergeIdentity(identity, identityHint);
+    const jwtPayload = tryDecodeJwtPayload(token);
+    const jwtIdentity = jwtPayload
+      ? {
+          oid: jwtPayload.oid || null,
+          tid: jwtPayload.tid || null,
+          user: jwtPayload.upn || jwtPayload.unique_name || jwtPayload.preferred_username || null
+        }
+      : null;
+
+    if (!alreadyValidated) {
+      if (jwtPayload) {
+        const scoped =
+          scopeIncludesM365Copilot(jwtPayload.scp) ||
+          scopeIncludesM365Copilot(jwtPayload.roles) ||
+          scopeIncludesM365Copilot(jwtPayload.aud);
+        if (!scoped && !identityHint) {
+          logMessage(`Ignoring unrelated token candidate from ${source}`);
+          return;
+        }
+        mergeIdentity(identity, jwtIdentity);
+      } else if (!identityHint) {
+        // Opaque token without an out-of-band identity/scope hint — do not guess.
+        logMessage(`Ignoring opaque token candidate from ${source} (no identity/scope hint)`);
+        return;
+      }
+    } else if (jwtIdentity) {
+      mergeIdentity(identity, jwtIdentity);
     }
     bearerToken = token;
     logMessage(`Bearer token captured via ${source}.`);
@@ -209,14 +316,20 @@ async function readCopilotTokenFromStorage(page) {
     }
     const token = extractAccessTokenFromUrl(url);
     if (token) {
-      acceptToken(token, 'websocket URL', { alreadyValidated: isSubstrateChatUrl(url) });
+      acceptToken(token, 'websocket URL', {
+        alreadyValidated: isSubstrateChatUrl(url),
+        identityHint: extractIdentityFromSubstrateUrl(url)
+      });
     }
   });
   client.on('Network.webSocketWillSendHandshakeRequest', ({ request }) => {
     const url = request && request.url;
     const token = extractAccessTokenFromUrl(url);
     if (token) {
-      acceptToken(token, 'websocket handshake', { alreadyValidated: isSubstrateChatUrl(url) });
+      acceptToken(token, 'websocket handshake', {
+        alreadyValidated: isSubstrateChatUrl(url),
+        identityHint: extractIdentityFromSubstrateUrl(url)
+      });
     }
   });
 
@@ -250,7 +363,11 @@ async function readCopilotTokenFromStorage(page) {
           json.access_token &&
           scopeIncludesM365Copilot(json.scope || json.scopes)
         ) {
-          acceptToken(json.access_token, 'oauth token response', { alreadyValidated: true });
+          // ID tokens are for clients; access tokens are opaque — take identity from id_token only.
+          acceptToken(json.access_token, 'oauth token response', {
+            alreadyValidated: true,
+            identityHint: identityFromJwtOrIdToken(json.id_token)
+          });
         }
       }
     } catch (err) {
@@ -287,8 +404,15 @@ async function readCopilotTokenFromStorage(page) {
     while (!bearerToken && Date.now() < deadline) {
       try {
         const fromStorage = await readCopilotTokenFromStorage(page);
-        if (fromStorage) {
-          acceptToken(fromStorage, 'local/session storage');
+        if (fromStorage && fromStorage.token) {
+          acceptToken(fromStorage.token, 'local/session storage', {
+            alreadyValidated: true,
+            identityHint: {
+              oid: fromStorage.oid,
+              tid: fromStorage.tid,
+              user: fromStorage.user
+            }
+          });
           return;
         }
       } catch (_) {
@@ -311,7 +435,17 @@ async function readCopilotTokenFromStorage(page) {
 
   if (bearerToken) {
     fs.writeFileSync('token_output.txt', bearerToken, { encoding: 'utf8' });
+    // stdout contract for Python parser — access token is opaque; identity is separate.
     console.log('access_token:' + bearerToken);
+    if (identity.oid) {
+      console.log('oid:' + identity.oid);
+    }
+    if (identity.tid) {
+      console.log('tid:' + identity.tid);
+    }
+    if (identity.user) {
+      console.log('user:' + identity.user);
+    }
     await browser.close();
     process.exit(0);
   }

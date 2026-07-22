@@ -31,6 +31,9 @@ class CopilotConnector:
     """
 
     _SUBSTRATE_TOKEN_CACHE_KEY = "substrate_access_token"  # nosec
+    _SUBSTRATE_OID_CACHE_KEY = "substrate_oid"
+    _SUBSTRATE_TID_CACHE_KEY = "substrate_tid"
+    _SUBSTRATE_USER_CACHE_KEY = "substrate_user"
 
     def __init__(self, arguments: ChatArguments) -> None:
         self.__is_initialized = False
@@ -264,24 +267,53 @@ class CopilotConnector:
                 print("Node.js Errors:")
                 print(result.stderr)
 
-            access_token_array = result.stdout.split("access_token:")
-            if len(access_token_array) < 2 or access_token_array[1].strip() == "null":
+            parsed = self.__parse_bearer_script_stdout(result.stdout)
+            access_token = parsed.get("access_token")
+            if not access_token or access_token == "null":
                 print(
                     "Failed to get access token. Complete interactive sign-in in the Edge window "
                     "(profile: COPILOT_CLI_BROWSER_PROFILE or ~/.config/copilot-cli/msedge-profile), then retry."
                 )
                 return None
-            access_token = access_token_array[1].strip().splitlines()[0].strip()
-            if not access_token or access_token == "null":
-                print("Failed to get access token. Exiting...")
-                return None
-            self.__token_cache.put_token(CachedEntity(key=self._SUBSTRATE_TOKEN_CACHE_KEY, val=access_token))
+            self.__cache_substrate_session(
+                access_token=access_token,
+                oid=parsed.get("oid"),
+                tid=parsed.get("tid"),
+                user=parsed.get("user") or user,
+            )
             print(f"Access token cached successfully in {self.__token_cache.cache_path}.")
             return access_token
 
         except FileNotFoundError:
             print("Node.js executable not found. Please make sure Node.js is installed and in your PATH.")
             return None
+
+    @staticmethod
+    def __parse_bearer_script_stdout(stdout: str) -> dict:
+        """Parse `key:value` lines from the Node bearer helper (token is opaque; identity is separate)."""
+        parsed: dict = {}
+        for line in (stdout or "").splitlines():
+            if ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            key = key.strip()
+            value = value.strip()
+            if key in {"access_token", "oid", "tid", "user"} and value and value != "null":
+                # First matching line wins for access_token (value may be long).
+                parsed.setdefault(key, value)
+        return parsed
+
+    def __cache_substrate_session(
+        self, access_token: str, oid: Optional[str], tid: Optional[str], user: Optional[str]
+    ) -> None:
+        entities = [CachedEntity(key=self._SUBSTRATE_TOKEN_CACHE_KEY, val=access_token)]
+        if oid:
+            entities.append(CachedEntity(key=self._SUBSTRATE_OID_CACHE_KEY, val=oid))
+        if tid:
+            entities.append(CachedEntity(key=self._SUBSTRATE_TID_CACHE_KEY, val=tid))
+        if user:
+            entities.append(CachedEntity(key=self._SUBSTRATE_USER_CACHE_KEY, val=user))
+        self.__token_cache.put_tokens(entities)
 
     def __get_access_token_from_cache(self) -> Optional[str]:
         token = self.__token_cache.try_fetch_token(self._SUBSTRATE_TOKEN_CACHE_KEY)
@@ -290,15 +322,57 @@ class CopilotConnector:
             return None
         return token
 
-    def __get_websocket_url(self, bearer_token: str, scenario: CopilotScenarioEnum, parsed_token: dict) -> str:
+    @staticmethod
+    def __try_decode_jwt_claims(access_token: str) -> Optional[dict]:
+        """
+        Best-effort decode for legacy JWT-shaped tokens only.
+
+        Access tokens must be treated as opaque per Microsoft identity platform guidance.
+        Never require this path to succeed.
+        """
+        if not access_token or access_token.count(".") != 2:
+            return None
+        try:
+            return jwt.decode(access_token, algorithms=["RS256"], options={"verify_signature": False})
+        except Exception:
+            return None
+
+    def __resolve_substrate_identity(self, access_token: str) -> dict:
+        """
+        Resolve oid/tid/user without treating the access token as a data contract.
+
+        Preference order:
+        1. Identity cached alongside the token (from WS URL path / MSAL / id_token at capture time)
+        2. Soft-decode only if the token happens to still be JWT-shaped (legacy caches)
+        """
+        oid = self.__token_cache.try_fetch_token(self._SUBSTRATE_OID_CACHE_KEY)
+        tid = self.__token_cache.try_fetch_token(self._SUBSTRATE_TID_CACHE_KEY)
+        user = self.__token_cache.try_fetch_token(self._SUBSTRATE_USER_CACHE_KEY)
+
+        claims = self.__try_decode_jwt_claims(access_token)
+        if claims:
+            oid = oid or claims.get("oid")
+            tid = tid or claims.get("tid")
+            user = user or claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username")
+
+        if not oid or not tid:
+            raise CopilotConnectionFailedException(
+                "Could not resolve tenant/object id for the Substrate Chathub URL. "
+                "Access tokens are opaque and must not be parsed; re-run without --cached-token "
+                "so the CLI can capture oid/tid from the WebSocket URL or MSAL cache."
+            )
+
+        return {"oid": oid, "tid": tid, "user": user}
+
+    def __get_websocket_url(self, bearer_token: str, scenario: CopilotScenarioEnum, identity: dict) -> str:
         session_id = uuid.uuid4()
         client_request_id = uuid.uuid4()
 
-        tenant_id = parsed_token.get("tid")
-        object_id = parsed_token.get("oid")
+        tenant_id = identity.get("tid")
+        object_id = identity.get("oid")
 
         if not tenant_id or not object_id:
-            raise ValueError("Failed to parse tenant_id or object_id from bearer token.")
+            raise ValueError("Failed to resolve tenant_id or object_id for bearer token.")
 
         prefix = f"wss://substrate.office.com/m365Copilot/Chathub/{object_id}@{tenant_id}?X-ClientRequestId={client_request_id}&X-SessionId={session_id}&access_token={bearer_token}"
 
@@ -347,15 +421,15 @@ class CopilotConnector:
             print("Failed to get bearer token. Exiting...")
             raise CopilotConnectionFailedException("Could not get access token to connect to copilot.")
 
-        parsed_jwt = jwt.decode(access_token, algorithms=["RS256"], options={"verify_signature": False})
-        upn = parsed_jwt.get("upn")
-        unique_name = parsed_jwt.get("unique_name")
-
-        if self.__arguments.user not in (upn, unique_name):
-            raise CopilotConnectedUserMismatchException("Cached token is not for the user provided in the arguments.")
+        identity = self.__resolve_substrate_identity(access_token)
+        token_user = identity.get("user")
+        if token_user and self.__arguments.user and self.__arguments.user.lower() != str(token_user).lower():
+            raise CopilotConnectedUserMismatchException(
+                "Cached token is not for the user provided in the arguments."
+            )
 
         print("Acquired bearer token successfully.")
-        url = self.__get_websocket_url(access_token, self.__arguments.scenario, parsed_jwt)
+        url = self.__get_websocket_url(access_token, self.__arguments.scenario, identity)
         session_id = self.__get_session_from_url(url)
 
         available_agents: list[AgentInfoModel] = self.__get_available_agents(access_token)
