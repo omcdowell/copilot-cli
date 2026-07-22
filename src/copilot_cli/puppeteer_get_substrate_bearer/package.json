@@ -1,8 +1,8 @@
 {
   "dependencies": {
     "dotenv": "^16.4.5",
-    "puppeteer": "^22.10.0",
-    "ws": "^8.17.0"
+    "puppeteer": "^22.15.0",
+    "ws": "^8.21.1"
   },
   "name": "pupeteer_test_bh",
   "version": "1.0.0",
