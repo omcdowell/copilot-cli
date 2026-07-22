@@ -11,7 +11,6 @@ from copilot_cli.copilot.whoami.whoami import WhoAmI
 def _chat_args(args) -> ChatArguments:
     return ChatArguments(
         user=args.user,
-        password=args.password,
         use_cached_access_token=args.cached_token,
         verbose=VerboseEnum(args.verbose),
         scenario=CopilotScenarioEnum(args.scenario),

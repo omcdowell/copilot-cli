@@ -11,7 +11,6 @@ class ChatArguments(NamedTuple):
     """
 
     user: str
-    password: str
     use_cached_access_token: Optional[bool]
     scenario: CopilotScenarioEnum
     verbose: VerboseEnum

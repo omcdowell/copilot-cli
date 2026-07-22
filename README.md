@@ -17,14 +17,16 @@ Programmatically connect to Microsoft 365 Copilot (Office Business Chat or Teams
 ## Auth model
 
 1. Optional cache: `--cached-token` reads `substrate_access_token` from `./tokens.json`
-2. Else: Puppeteer headless login (`office.com` or `teams.microsoft.com`) captures the Substrate bearer
+2. Else: Puppeteer opens a **visible Microsoft Edge** window with a persistent profile (default `~/.config/copilot-cli/msedge-profile`). Sign in once interactively (MFA/SSO OK); later runs reuse cookies — **no passwords on the CLI**.
 3. Token is attached to `wss://substrate.office.com/m365Copilot/Chathub/...`
+
+Override the profile directory with `COPILOT_CLI_BROWSER_PROFILE`. Override the Edge binary with `COPILOT_CLI_EDGE_PATH` if needed.
 
 Scenarios: `officeweb` | `teamshub`
 
 ## Install
 
-**Prerequisites:** Python 3.9+ and Node.js on `PATH` (needed for password-based auth / Puppeteer).
+**Prerequisites:** Python 3.9+, Node.js on `PATH`, and Microsoft Edge installed (for substrate token capture).
 
 ### Windows (PowerShell)
 
@@ -43,8 +45,7 @@ cd ..\..\..\..
 
 If script activation is blocked: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then re-run `Activate.ps1`.
 
-Chrome is preferred for Puppeteer on Windows (scripts try  
-`C:\Program Files\Google\Chrome\Application\chrome.exe`, then fall back to Puppeteer’s Chromium).
+Auth uses system Microsoft Edge with a dedicated profile under `%USERPROFILE%\.config\copilot-cli\msedge-profile` (or `COPILOT_CLI_BROWSER_PROFILE`).
 
 ### Linux / macOS (Astral / uv — optional)
 
@@ -125,8 +126,10 @@ Without activating:
 
 ## Usage
 
+First run opens a visible Edge window — sign in once. Later runs reuse the profile session.
+
 ```bash
-copilot-cli chat -u user@contoso.com -p 'password' -s officeweb
+copilot-cli chat -u user@contoso.com -s officeweb
 copilot-cli whoami -u user@contoso.com --cached-token -s officeweb
 copilot-cli dump -u user@contoso.com --cached-token -s officeweb -d ./whoami_out
 ```
@@ -134,10 +137,17 @@ copilot-cli dump -u user@contoso.com --cached-token -s officeweb -d ./whoami_out
 Same via module form:
 
 ```bash
-python -m copilot_cli chat -u user@contoso.com -p 'password' -s officeweb
+python -m copilot_cli chat -u user@contoso.com -s officeweb
 ```
 
-On Windows PowerShell, quoting is the same for these flags; use `--cached-token` after putting a token in `.\tokens.json` if SSO blocks password login.
+Optional env vars (paths only — never put passwords in env):
+
+```bash
+export COPILOT_CLI_BROWSER_PROFILE=~/.config/copilot-cli/msedge-profile
+export COPILOT_CLI_EDGE_PATH=/usr/bin/microsoft-edge   # if auto-detect fails
+```
+
+Prefer `--cached-token` once `./tokens.json` already holds a substrate bearer.
 
 ## Layout
 

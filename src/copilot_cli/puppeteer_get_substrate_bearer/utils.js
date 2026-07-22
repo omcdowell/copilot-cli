@@ -1,17 +1,18 @@
 function getArguments() {
     const args = process.argv.slice(2);
 
-    if (args.length < 2) {
-        console.error("Too few arguments. Please provide the username and password as arguments in the following format: 'user=<your_user> password=<your_password>'.");
+    if (args.length < 1) {
+        console.error(
+            "Too few arguments. Provide the username as: 'user=<your_user>' " +
+            "(optional: debugMode=true). Sign in interactively in the Edge window; passwords are not accepted."
+        );
         process.exit(1);
     }
     const user = getSingleArgument(args, "user");
-    const password = getSingleArgument(args, "password");
     const debugMode = getOptionalArgument(args, "debugMode", "false");
 
     return {
         "user": user,
-        "password": password,
         "debugMode": debugMode
     };
 }

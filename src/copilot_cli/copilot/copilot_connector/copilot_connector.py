@@ -1,3 +1,4 @@
+import os
 import pathlib
 import subprocess  # nosec
 import uuid
@@ -223,7 +224,6 @@ class CopilotConnector:
         scenario = self.__arguments.scenario
         debugging = self.__arguments.verbose
         user = self.__arguments.user
-        password = self.__arguments.password
 
         access_token: Optional[str] = None
         if self.__arguments.use_cached_access_token or refresh:
@@ -231,12 +231,11 @@ class CopilotConnector:
                 print("Access token retrieved from cache.")
                 return access_token
             else:
-                if not self.__arguments.password:
-                    raise CopilotConnectionFailedException(
-                        "Could not get access token to connect to copilot from cache, and no password is provided."
-                    )
+                print(
+                    "Cached substrate token not found; launching persistent Edge profile for interactive sign-in."
+                )
 
-        print("Falling back to getting access token with user password sign in..")
+        print("Getting access token via persistent Microsoft Edge profile (no password)...")
 
         module = "get_substrate_bearer_office" if scenario == CopilotScenarioEnum.officeweb else "get_substrate_bearer_teams"
         debugMode = "true" if debugging == VerboseEnum.full else "false"  # passing in boolean values as string makes it easier
@@ -245,18 +244,19 @@ class CopilotConnector:
             pathlib.Path(__file__).resolve().parents[2] / "puppeteer_get_substrate_bearer" / f"{module}.js"
         )
         try:
-            # Run the Node.js script using subprocess
+            # Run the Node.js script using subprocess. Env may include
+            # COPILOT_CLI_BROWSER_PROFILE / COPILOT_CLI_EDGE_PATH (paths only, never secrets).
             result = subprocess.run(  # nosec
                 [
                     "node",
                     str(puppeteer_script),  # nosec
                     f"user={user}",  # nosec
-                    f"password={password}",  # nosec
                     f"debugMode={debugMode}",
                 ],
                 capture_output=True,
                 text=True,
                 cwd=str(puppeteer_script.parent),
+                env=os.environ.copy(),
             )
 
             # Print any error messages
@@ -265,10 +265,16 @@ class CopilotConnector:
                 print(result.stderr)
 
             access_token_array = result.stdout.split("access_token:")
-            if len(access_token_array) < 2 or access_token_array[1] == "null":
+            if len(access_token_array) < 2 or access_token_array[1].strip() == "null":
+                print(
+                    "Failed to get access token. Complete interactive sign-in in the Edge window "
+                    "(profile: COPILOT_CLI_BROWSER_PROFILE or ~/.config/copilot-cli/msedge-profile), then retry."
+                )
+                return None
+            access_token = access_token_array[1].strip().splitlines()[0].strip()
+            if not access_token or access_token == "null":
                 print("Failed to get access token. Exiting...")
                 return None
-            access_token = access_token_array[1].strip()
             self.__token_cache.put_token(CachedEntity(key=self._SUBSTRATE_TOKEN_CACHE_KEY, val=access_token))
             print(f"Access token cached successfully in {self.__token_cache.cache_path}.")
             return access_token

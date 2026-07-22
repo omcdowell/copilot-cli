@@ -11,9 +11,12 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  copilot-cli chat -u user@example.com -p 'pass' -s officeweb
+  copilot-cli chat -u user@example.com -s officeweb
   copilot-cli whoami -u user@example.com --cached-token -s officeweb
   copilot-cli dump -u user@example.com --cached-token -s officeweb -d ./whoami_out
+
+Auth uses a persistent Microsoft Edge profile (default ~/.config/copilot-cli/msedge-profile).
+Override with COPILOT_CLI_BROWSER_PROFILE. Sign in once in the visible Edge window; no passwords.
         """,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -41,7 +44,6 @@ Examples:
 
 def _add_auth_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-u", "--user", required=True, type=str, help="User email to connect")
-    parser.add_argument("-p", "--password", required=False, type=str, help="User password (needed if no cached token)")
     parser.add_argument(
         "--cached-token",
         action="store_true",

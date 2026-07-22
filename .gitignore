@@ -7,6 +7,8 @@ build/
 .venv/
 venv/
 .env
+.env.*
+!.env.example
 tokens.json
 token_output.txt
 network_log.txt
@@ -21,3 +23,11 @@ uv.lock
 *.log
 whoami_*/
 dump_*/
+# Browser automation state (never commit)
+**/edge-profile/
+**/browser-profile/
+**/msedge-profile/
+storageState.json
+**/storage-state.json
+*.har
+**/screenshots/

@@ -1,103 +1,116 @@
-// Description: This script logs into Microsoft Teams and retrieves the bearer token for the Substrate API.
-// If you need the results faster, you can reduce the delays' values, but do so with caution (it's a clean-and-dirty way to make things work for this POC).
+// Description: Log into Microsoft Teams (interactive Edge profile) and retrieve the Substrate bearer token.
+// Passwords are never accepted: sign in once in the visible Edge window; the persistent profile reuses the session.
 
-const puppeteer = require('puppeteer'); // Ensure you have puppeteer installed
-require('dotenv').config(); // Include the dotenv package to read the .env file
+const puppeteer = require('puppeteer');
 let Utils = require("./utils.js");
+const { launchPersistentEdge } = require("./browser.js");
 
-const ARGS = Utils.getArguments()
-const PASSWORD = ARGS["password"]
-const USER = ARGS["user"]
+const ARGS = Utils.getArguments();
+const USER = ARGS["user"];
 
+const LOGIN_WAIT_MS = 10 * 60 * 1000;
 
 function delay(time) {
     return new Promise(function (resolve) {
-        setTimeout(resolve, time)
+        setTimeout(resolve, time);
     });
 }
 
-(async () => {
+function logMessage(message) {
+    console.error(message);
+}
 
+async function maybePrefillUsername(page, user) {
+    try {
+        await page.waitForSelector('#i0116', { timeout: 5000 });
+        const current = await page.$eval('#i0116', el => el.value || '');
+        if (!current) {
+            await page.type('#i0116', user);
+        }
+        logMessage(`Username field present. Complete sign-in in the Edge window (MFA/SSO supported). User hint: ${user}`);
+    } catch (_) {
+        // Already signed in or different login surface.
+    }
+}
+
+async function waitForTeamsSession(page, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const state = await page.evaluate(() => {
+            if (document.querySelector('#i0118') || document.querySelector('#i0116')) {
+                return 'login';
+            }
+            // Teams shell / chat list indicators once past login.
+            if (
+                document.querySelector('#title-chat-list-item_bizChatMetaOSChatListEntryPoint') ||
+                document.querySelector('[data-tid="app-layout-area--main"]') ||
+                document.querySelector('#app') ||
+                document.body?.innerText?.includes('Copilot')
+            ) {
+                return 'ready';
+            }
+            return 'pending';
+        });
+        if (state === 'ready') {
+            return true;
+        }
+        await delay(2000);
+    }
+    return false;
+}
+
+(async () => {
     const windowWidth = 1920;
     const windowHeight = 1080;
-    
-    let browser;
-    // In case you have issues, you can try to use the following flags (often issues can occur from specific Chrome instances or profiles, sometimes clean ones help)
-    // https://stackoverflow.com/questions/57623828/in-puppeteer-how-to-switch-to-chrome-window-from-default-profile-to-desired-prof/57662769#57662769
 
+    let browser;
+    let profileDir;
     try {
-        // For windows the executable path is to open the existing chrome instead of the
-        // "Chrome for testing" that is included with puppeteer - solves white screen bug
-        browser = await puppeteer.launch({
-            headless: true, // Change to 'false' to see the browser actions for debugging
-            // Use the default windows path for chrome exe - solves white window bug for windows
-            executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-            // Start the browser in incognito mode
-            args: ['--incognito']
-        });
-    } catch(e) {
-         browser = await puppeteer.launch({
-            headless: true, // Change to 'false' to see the browser actions for debugging
-            // Start the browser in fullscreen and incognito mode
-            args: ['--start-fullscreen', '--incognito']
-        });
+        ({ browser, profileDir } = await launchPersistentEdge({ windowWidth, windowHeight }));
+    } catch (e) {
+        console.error(e.message || e);
+        process.exit(1);
     }
 
+    const [page] = await browser.pages();
 
-    // Create a new page
-    const [page] = await browser.pages(); // Get the only page opened by Puppeteer
-
-    // Set the viewport size
     await page.setViewport({
         width: windowWidth,
         height: windowHeight
     });
 
-    const timeout = 15000; // Set the timeout to 15 seconds
+    const timeout = 15000;
     page.setDefaultTimeout(timeout);
 
-    // Go to a the Teams URL (will be changed with the dynamics URL in the future)
     await page.goto('https://teams.microsoft.com/_');
-    console.log("Starting the login process");
+    logMessage("Starting the login process (persistent Edge profile)");
 
-    // Enter the test username
-    await page.waitForSelector('#i0116');
-    await page.type('#i0116', USER);
+    await maybePrefillUsername(page, USER);
 
-    // Click on the 'Next' button
-    await page.waitForSelector('#idSIButton9', { visible: true });
-    await page.evaluate(() => {
-        document.querySelector('#idSIButton9').click();
-    });
+    if (await page.$('#i0116') || await page.$('#i0118')) {
+        logMessage(
+            `Sign in in the Edge window (profile at ${profileDir}). MFA/SSO supported. Waiting up to ${LOGIN_WAIT_MS / 60000} minutes...`
+        );
+        const ok = await waitForTeamsSession(page, LOGIN_WAIT_MS);
+        if (!ok) {
+            logMessage("Login wait timed out or state unclear; continuing to Copilot journey...");
+        } else {
+            logMessage("Teams session detected.");
+        }
+    } else {
+        logMessage("Existing Edge profile session detected (or login UI not shown).");
+        await waitForTeamsSession(page, 30000);
+    }
 
-    // Wait for the password field to be visible and enter the password in it
-    await page.waitForSelector('#i0118', { visible: true });
-    await page.type('#i0118', PASSWORD);
+    await delay(5000);
+    logMessage("Starting user journey to CoPilot");
 
-    // Click on the 'Sign in' button
-    await page.waitForSelector('#idSIButton9');
-    await delay(2000); // Wait for 2 seconds to avoid sync issues
-    await page.click('#idSIButton9');
-
-    console.log("Logging in");
-
-    // Click 'Yes' button to stay signed in
-    await page.waitForSelector('#idSIButton9');
-    await delay(2000); // Wait for 2 seconds to avoid sync issues
-    await page.click('#idSIButton9');
-
-    console.log("Completed logging in");
-
-    await delay(10000); // Wait for 10 seconds to avoid sync issues
-
-    console.log("Starting user journey to CoPilot");
-
-    {
+    try {
         const targetPage = page;
         const promises = [];
         const startWaitingForEvents = () => {
             promises.push(targetPage.waitForNavigation());
-        }
+        };
         await puppeteer.Locator.race([
             targetPage.locator('::-p-aria([role=\\"dialog\\"]) >>>> ::-p-aria(Switch now)'),
             targetPage.locator('#ngdialog1 button'),
@@ -113,11 +126,13 @@ function delay(time) {
                 },
             });
         await Promise.all(promises);
+    } catch (_) {
+        logMessage("No Teams 'Switch now' dialog (ok if already on new Teams).");
     }
 
-    await delay(10000);
+    await delay(5000);
 
-    {
+    try {
         const targetPage = page;
         await puppeteer.Locator.race([
             targetPage.locator('::-p-aria(Copilot)'),
@@ -132,18 +147,18 @@ function delay(time) {
                     y: 10.333328247070312,
                 },
             });
+    } catch (e) {
+        logMessage("Could not click Copilot entry automatically; open Copilot in the Edge window if needed.");
     }
 
-    console.log("Completed user journey, grabbing substrate token from the headless browser's local storage key");
+    logMessage("Completed user journey, grabbing substrate token from local storage");
 
-    await delay(10000); // Wait for 10 seconds to avoid sync issues
+    await delay(10000);
 
-    // Retrieve the value of 'secret' from local storage if the key's value includes a reference to 'https://substrate.office.com/sydney/.default'
-    // This is the bearer token for the Substrate API (also seen in the network tab WS under the access_token parameter)
     const secretValue = await page.evaluate(() => {
         const key = Object.keys(localStorage).find(k => {
             const value = localStorage.getItem(k);
-            return value.includes('https://substrate.office.com/sydney/.default');
+            return value && value.includes('https://substrate.office.com/sydney/.default');
         });
 
         if (key) {
@@ -153,12 +168,14 @@ function delay(time) {
         return null;
     });
 
-    // Print the bearer token to the console (change this to save it to a file or a secure location)
+    // stdout contract for Python parser — keep this format.
     console.log('access_token:%s', secretValue);
 
-    await browser.close(); // Close the browser
+    await browser.close();
 
-    // Catch errors and log them to the console
+    if (!secretValue) {
+        process.exit(1);
+    }
 })().catch(err => {
     console.error(err);
     process.exit(1);
