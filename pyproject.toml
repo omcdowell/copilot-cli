@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Standalone M365 Copilot CLI — interact with Copilot365 via Office/Teams substrate API"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "Extracted from mbrg/power-pwn (Zenity Labs)" }]
+authors = [{ name = "omcdowell" }]
 requires-python = ">=3.9"
 dependencies = [
     "requests>=2.31.0",
