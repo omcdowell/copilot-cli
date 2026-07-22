@@ -1,5 +1,7 @@
-// Description: Log into Microsoft Office (interactive Edge profile) and capture the Substrate bearer token.
-// Passwords are never accepted: sign in once in the visible Edge window; the persistent profile reuses the session.
+// Description: Open M365 Copilot chat in a persistent Edge profile and capture the Substrate bearer token.
+// Trigger: loading https://m365.cloud.microsoft/chat causes the client to open
+// wss://substrate.../Chathub/...?access_token=<sydney-jwt> — that query param is the token.
+// Passwords are never accepted: sign in once in the visible Edge window.
 
 const puppeteer = require('puppeteer');
 let Utils = require("./utils.js");
@@ -11,7 +13,9 @@ const USER = ARGS["user"];
 const DEBUGMODE = ARGS["debugMode"];
 
 const NETWORK_LOG_FILE = 'network_log.txt';
-const LOGIN_WAIT_MS = 10 * 60 * 1000; // allow MFA / SSO
+const LOGIN_WAIT_MS = 10 * 60 * 1000;
+const TOKEN_WAIT_MS = 90 * 1000;
+const COPILOT_CHAT_URL = 'https://m365.cloud.microsoft/chat';
 
 if (DEBUGMODE === 'true') {
   fs.writeFileSync(NETWORK_LOG_FILE, '', { encoding: 'utf8' });
@@ -25,49 +29,121 @@ function logMessage(message) {
   console.error(message);
 }
 
-async function maybePrefillUsername(page, user, timeout) {
+function extractAccessTokenFromUrl(url) {
+  if (!url || typeof url !== 'string') {
+    return null;
+  }
+  const isSubstrate =
+    url.includes('substrate.office.com') ||
+    url.includes('substrate.svc.cloud.microsoft') ||
+    /\/m365Copilot\/Chat[Hh]ub\//i.test(url) ||
+    /\/m365chat\/SecuredChat[Hh]ub\//i.test(url);
+  if (!isSubstrate && !url.includes('access_token=')) {
+    return null;
+  }
+  let match = url.match(/[?&]access_token=([^&]+)/);
+  if (!match) {
+    return null;
+  }
   try {
-    const usernameField = await page.waitForSelector('#i0116', { timeout: 5000 });
-    if (usernameField) {
-      const current = await page.$eval('#i0116', el => el.value || '');
-      if (!current) {
-        await page.type('#i0116', user);
-      }
-      logMessage(`Username field present. Complete sign-in in the Edge window (MFA/SSO supported). User hint: ${user}`);
-    }
+    return decodeURIComponent(match[1]);
   } catch (_) {
-    // Already signed in or a different login surface — continue.
+    return match[1];
   }
 }
 
-async function waitUntilSignedInOrTimeout(page, timeoutMs) {
+function looksLikeSydneyToken(token) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) {
+    return false;
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    const aud = payload.aud;
+    if (typeof aud === 'string' && aud.includes('substrate.office.com/sydney')) {
+      return true;
+    }
+    if (Array.isArray(aud) && aud.some(a => String(a).includes('substrate.office.com/sydney'))) {
+      return true;
+    }
+    // Some tokens only expose scp/roles; still accept JWT-shaped tokens from substrate WS.
+    return Boolean(payload.oid && payload.tid);
+  } catch (_) {
+    return token.startsWith('eyJ');
+  }
+}
+
+async function maybePrefillUsername(page, user) {
+  try {
+    await page.waitForSelector('#i0116', { timeout: 5000 });
+    const current = await page.$eval('#i0116', el => el.value || '');
+    if (!current) {
+      await page.type('#i0116', user);
+    }
+    logMessage(`Username field present. Complete sign-in in the Edge window (MFA/SSO supported). User hint: ${user}`);
+  } catch (_) {
+    // Already signed in or a different login surface.
+  }
+}
+
+async function waitUntilPastLogin(page, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    // Office account button after login, or absence of password field after navigation.
-    const signedIn = await page.evaluate(() => {
-      if (document.querySelector('#mectrl_headerPicture')) {
-        const aria = document.querySelector('#mectrl_headerPicture')?.getAttribute('aria-label') || '';
-        // Signed-in control usually includes the account name; guest shows "Sign in".
-        if (aria && !/sign in/i.test(aria)) {
-          return true;
-        }
+    const state = await page.evaluate(() => {
+      if (document.querySelector('#i0118') || document.querySelector('#i0116')) {
+        return 'login';
       }
-      // Password field still visible => still on login flow.
-      if (document.querySelector('#i0118')) {
-        return false;
+      const host = location.hostname || '';
+      if (host.includes('login.microsoftonline.com') || host.includes('login.live.com')) {
+        return 'login';
       }
-      // Username field still the focus of login.
-      if (document.querySelector('#i0116')) {
-        return false;
+      if (host.includes('m365.cloud.microsoft') || host.includes('office.com') || host.includes('microsoft365.com')) {
+        return 'app';
       }
-      return false;
+      return 'pending';
     });
-    if (signedIn) {
+    if (state === 'app') {
       return true;
     }
     await delay(2000);
   }
   return false;
+}
+
+async function readSydneyTokenFromStorage(page) {
+  return page.evaluate(() => {
+    const scan = (storage) => {
+      try {
+        for (const key of Object.keys(storage)) {
+          const value = storage.getItem(key);
+          if (!value || !value.includes('substrate.office.com/sydney')) {
+            continue;
+          }
+          try {
+            const data = JSON.parse(value);
+            if (data && typeof data.secret === 'string') {
+              return data.secret;
+            }
+            if (Array.isArray(data)) {
+              for (const entry of data) {
+                if (entry && typeof entry.secret === 'string' && String(entry.scope || entry.scopes || '').includes('sydney')) {
+                  return entry.secret;
+                }
+              }
+            }
+          } catch (_) {
+            const match = value.match(/"secret"\s*:\s*"([^"]+)"/);
+            if (match) {
+              return match[1];
+            }
+          }
+        }
+      } catch (_) {
+        // ignore
+      }
+      return null;
+    };
+    return scan(localStorage) || scan(sessionStorage);
+  });
 }
 
 (async () => {
@@ -83,7 +159,7 @@ async function waitUntilSignedInOrTimeout(page, timeoutMs) {
     process.exit(1);
   }
 
-  const [page] = await browser.pages();
+  const page = (await browser.pages())[0] || await browser.newPage();
   await page.setViewport({
     width: windowWidth,
     height: windowHeight
@@ -97,131 +173,150 @@ async function waitUntilSignedInOrTimeout(page, timeoutMs) {
     tokenCapturedResolver = resolve;
   });
 
-  const tokenResponseHandler = async response => {
-    try {
-      const url = response.url();
-      const status = response.status();
-      let text = '';
-      try {
-        text = await response.text();
-      } catch (e) {
-        text = 'Could not read response body.';
-      }
-
-      if (DEBUGMODE === 'true') {
-        const logEntry = `URL: ${url}\nStatus: ${status}\nResponse Snippet: ${text.substring(0,200)}\n--------------------------------\n`;
-        fs.appendFileSync(NETWORK_LOG_FILE, logEntry, { encoding: 'utf8' });
-      }
-
-      if (
-        url.includes("/oauth2/v2.0/token") &&
-        (text.includes('"token_type":"Bearer"') || text.includes('"tokenType":"Bearer"')) &&
-        text.includes("sydney")
-      ) {
-        let json;
-        try {
-          json = JSON.parse(text);
-        } catch (e) {
-          // Fallback regex below.
-        }
-        if (json && json.access_token) {
-          bearerToken = json.access_token;
-          logMessage("Bearer token captured from network response.");
-          page.off('response', tokenResponseHandler);
-          if (tokenCapturedResolver) {
-            tokenCapturedResolver(bearerToken);
-            tokenCapturedResolver = null;
-          }
-        } else {
-          const match = text.match(/"access_token"\s*:\s*"([^"]+)"/);
-          if (match && match[1]) {
-            bearerToken = match[1];
-            logMessage("Bearer token captured from network response (regex).");
-            page.off('response', tokenResponseHandler);
-            if (tokenCapturedResolver) {
-              tokenCapturedResolver(bearerToken);
-              tokenCapturedResolver = null;
-            }
-          }
-        }
-      }
-    } catch (err) {
-      console.error("Error capturing network response: ", err);
+  const acceptToken = (token, source) => {
+    if (!token || bearerToken) {
+      return;
+    }
+    if (!looksLikeSydneyToken(token)) {
+      logMessage(`Ignoring non-sydney token candidate from ${source}`);
+      return;
+    }
+    bearerToken = token;
+    logMessage(`Bearer token captured via ${source}.`);
+    if (tokenCapturedResolver) {
+      tokenCapturedResolver(bearerToken);
+      tokenCapturedResolver = null;
     }
   };
 
-  page.on('response', tokenResponseHandler);
-
-  await page.goto('https://www.office.com/');
-
-  await maybePrefillUsername(page, USER, timeout);
-
-  // If already signed in, the account picture is present quickly.
-  let needsInteractiveLogin = false;
-  try {
-    await page.waitForSelector('#mectrl_headerPicture', { timeout: 10000 });
-    const label = await page.$eval('#mectrl_headerPicture', el => el.getAttribute('aria-label') || '');
-    if (/sign in/i.test(label)) {
-      needsInteractiveLogin = true;
-      await page.click('#mectrl_headerPicture');
-      await maybePrefillUsername(page, USER, timeout);
+  // Primary trigger: Copilot chat opens a Substrate WebSocket with access_token= in the URL.
+  const client = await page.createCDPSession();
+  await client.send('Network.enable');
+  client.on('Network.webSocketCreated', ({ url }) => {
+    if (DEBUGMODE === 'true') {
+      fs.appendFileSync(NETWORK_LOG_FILE, `WS created: ${url}\n`, { encoding: 'utf8' });
     }
-  } catch (_) {
-    needsInteractiveLogin = true;
-  }
+    const token = extractAccessTokenFromUrl(url);
+    if (token) {
+      acceptToken(token, 'websocket URL');
+    }
+  });
+  client.on('Network.webSocketWillSendHandshakeRequest', ({ request }) => {
+    const url = request && request.url;
+    const token = extractAccessTokenFromUrl(url);
+    if (token) {
+      acceptToken(token, 'websocket handshake');
+    }
+  });
 
-  if (needsInteractiveLogin || await page.$('#i0116') || await page.$('#i0118')) {
+  // Secondary: MSAL token endpoint response (older office.com flow).
+  page.on('response', async response => {
+    try {
+      const url = response.url();
+      let text = '';
+      try {
+        text = await response.text();
+      } catch (_) {
+        return;
+      }
+      if (DEBUGMODE === 'true') {
+        fs.appendFileSync(
+          NETWORK_LOG_FILE,
+          `URL: ${url}\nStatus: ${response.status()}\nSnippet: ${text.substring(0, 200)}\n--------------------------------\n`,
+          { encoding: 'utf8' }
+        );
+      }
+      if (
+        url.includes('/oauth2/v2.0/token') &&
+        (text.includes('"token_type":"Bearer"') || text.includes('"tokenType":"Bearer"')) &&
+        text.includes('sydney')
+      ) {
+        try {
+          const json = JSON.parse(text);
+          if (json.access_token) {
+            acceptToken(json.access_token, 'oauth token response');
+            return;
+          }
+        } catch (_) {
+          // fall through
+        }
+        const match = text.match(/"access_token"\s*:\s*"([^"]+)"/);
+        if (match) {
+          acceptToken(match[1], 'oauth token response (regex)');
+        }
+      }
+    } catch (err) {
+      console.error('Error capturing network response: ', err);
+    }
+  });
+
+  logMessage(`Navigating to Copilot chat: ${COPILOT_CHAT_URL}`);
+  logMessage(`Edge profile: ${profileDir}`);
+  await page.goto(COPILOT_CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await maybePrefillUsername(page, USER);
+
+  if (await page.$('#i0116') || await page.$('#i0118') || (page.url() || '').includes('login.microsoftonline.com')) {
     logMessage(
-      `Sign in in the Edge window (profile at ${profileDir}). MFA/SSO supported. Waiting up to ${LOGIN_WAIT_MS / 60000} minutes...`
+      `Sign in in the Edge window if prompted (profile at ${profileDir}). MFA/SSO supported. Waiting up to ${LOGIN_WAIT_MS / 60000} minutes...`
     );
-    const ok = await waitUntilSignedInOrTimeout(page, LOGIN_WAIT_MS);
+    const ok = await waitUntilPastLogin(page, LOGIN_WAIT_MS);
     if (!ok && !bearerToken) {
-      // Soft continue: Copilot journey may still trigger token capture after partial SSO.
-      logMessage("Login wait timed out or state unclear; continuing to Copilot journey...");
+      logMessage('Login wait timed out or state unclear; continuing to watch for Substrate token...');
     } else if (ok) {
-      logMessage("Signed-in session detected.");
+      logMessage('App session detected; waiting for Copilot chat to request Substrate token...');
+      // Ensure we are on chat after SSO redirects.
+      if (!(page.url() || '').includes('/chat')) {
+        await page.goto(COPILOT_CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      }
     }
   } else {
-    logMessage("Existing Edge profile session detected.");
+    logMessage('Existing Edge profile session detected; waiting for Substrate WebSocket...');
   }
 
-  await delay(3000);
+  // Tertiary: poll MSAL/localStorage while chat boots.
+  const storagePoll = (async () => {
+    const deadline = Date.now() + TOKEN_WAIT_MS;
+    while (!bearerToken && Date.now() < deadline) {
+      try {
+        const fromStorage = await readSydneyTokenFromStorage(page);
+        if (fromStorage) {
+          acceptToken(fromStorage, 'local/session storage');
+          return;
+        }
+      } catch (_) {
+        // page may be navigating
+      }
+      await delay(2000);
+    }
+  })();
 
-  logMessage("Starting user journey to get the Pacman token");
-
-  try {
-    const targetPage = page;
-    await puppeteer.Locator.race([
-      targetPage.locator('#d870f6cd-4aa5-4d42-9626-ab690c041429'),
-    ])
-      .setTimeout(timeout)
-      .click();
-  } catch (e) {
-    logMessage("Could not click Copilot entry automatically; open Copilot in the Edge window if needed.");
-  }
-  await delay(10000);
-
-  logMessage("Waiting for Pacman token from network responses");
+  logMessage(
+    'Token trigger: open Copilot chat so the page connects to substrate Chathub with access_token= in the WS URL. ' +
+    'If chat does not load, open Chat manually in the Edge window.'
+  );
 
   await Promise.race([
     tokenCapturedPromise,
-    delay(60000).then(() => null)
+    storagePoll.then(() => bearerToken),
+    delay(TOKEN_WAIT_MS).then(() => null)
   ]);
 
   if (bearerToken) {
     fs.writeFileSync('token_output.txt', bearerToken, { encoding: 'utf8' });
-    // stdout contract for Python parser — keep this format.
     console.log('access_token:' + bearerToken);
     await browser.close();
     process.exit(0);
-  } else {
-    fs.writeFileSync('token_output.txt', 'No valid token captured from network responses.', { encoding: 'utf8' });
-    console.error('No valid token captured from network responses.');
-    console.log('access_token:null');
-    await browser.close();
-    process.exit(1);
   }
-})().catch(async err => {
+
+  fs.writeFileSync('token_output.txt', 'No valid token captured from network responses.', { encoding: 'utf8' });
+  console.error(
+    'No Substrate token captured. Ensure Copilot chat loads at m365.cloud.microsoft/chat ' +
+    '(not just the M365 home page). Debug with debugMode=true and inspect network_log.txt for WS URLs.'
+  );
+  console.log('access_token:null');
+  await browser.close();
+  process.exit(1);
+})().catch(err => {
   console.error(err);
   process.exit(1);
 });

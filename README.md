@@ -17,7 +17,7 @@ Programmatically connect to Microsoft 365 Copilot (Office Business Chat or Teams
 ## Auth model
 
 1. Optional cache: `--cached-token` reads `substrate_access_token` from `./tokens.json`
-2. Else: Puppeteer opens a **visible Microsoft Edge** window with a persistent profile (default `~/.config/copilot-cli/msedge-profile`). Sign in once interactively (MFA/SSO OK); later runs reuse cookies — **no passwords on the CLI**.
+2. Else: Puppeteer opens a **visible Microsoft Edge** window with a persistent profile (default `~/.config/copilot-cli/msedge-profile`) and navigates to **https://m365.cloud.microsoft/chat**. Sign in once interactively (MFA/SSO OK); later runs reuse cookies — **no passwords on the CLI**. The CLI captures the Substrate bearer from the chat WebSocket (`access_token=`), not from merely being signed in on the M365 home page.
 3. Token is attached to `wss://substrate.office.com/m365Copilot/Chathub/...`
 
 Override the profile directory with `COPILOT_CLI_BROWSER_PROFILE`. Override the Edge binary with `COPILOT_CLI_EDGE_PATH` if needed.

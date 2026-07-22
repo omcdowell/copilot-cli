@@ -31,10 +31,11 @@
       node get_substrate_bearer_office.js user=<your_user>
       ```
 
-        (uses www.office.com to get the token)
+        (opens **https://m365.cloud.microsoft/chat** and captures `access_token` from the Substrate WebSocket URL)
 
    - On first run, a visible Edge window opens. Sign in interactively (MFA/SSO supported). The session is stored in the profile directory for later runs.
-   - Optional: `debugMode=true` writes network snippets to `network_log.txt` (do not commit).
+   - **Token trigger (officeweb):** landing on the M365 home page is not enough. Copilot chat must load so the client opens `wss://substrate.../Chathub/...?access_token=...`. That query param is the bearer the CLI needs.
+   - Optional: `debugMode=true` writes network/WS snippets to `network_log.txt` (do not commit).
 
    - If you see errors regarding missing resources in the node_modules directory when you first run the script, please run the following to clear NPM cache and reinstall dependencies:
      ```bash
