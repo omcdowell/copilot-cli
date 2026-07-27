@@ -18,6 +18,9 @@ dependencies = [
     "typing_extensions>=4.0.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0"]
+
 [project.scripts]
 copilot-cli = "copilot_cli.main:main"
 

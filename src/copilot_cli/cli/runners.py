@@ -4,6 +4,7 @@ from copilot_cli.copilot.enums.verbose_enum import VerboseEnum
 from copilot_cli.copilot.gui.gui import Gui
 from copilot_cli.copilot.interactive_chat.interactive_chat import InteractiveChat
 from copilot_cli.copilot.models.chat_argument import ChatArguments
+from copilot_cli.copilot.openai_proxy.server import run_server
 from copilot_cli.copilot.whoami.whoami import WhoAmI
 
 
@@ -33,5 +34,7 @@ def run(args) -> None:
         output_dir = Dump(parsed, args.directory).run()
         if args.gui:
             Gui().run(output_dir)
+    elif args.command == "serve":
+        run_server(parsed, host=args.host, port=args.port)
     else:
         raise SystemExit(f"Unknown command: {args.command}")

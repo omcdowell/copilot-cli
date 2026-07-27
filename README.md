@@ -12,6 +12,51 @@ Programmatically connect to Microsoft 365 Copilot (Office Business Chat or Teams
 | `whoami` | User/context recon through Copilot |
 | `dump` | Exfil-style data dump from whoami recon |
 | `gui` | Browse collected output locally |
+| `serve` | OpenAI-compatible HTTP proxy for Pi and other clients |
+
+## Pi integration (M365 Copilot as a model)
+
+Run the local OpenAI-compatible proxy, then point Pi at it via the bundled extension.
+
+### 1. Start the proxy
+
+```bash
+copilot-cli serve -u user@contoso.com --cached-token -s officeweb --port 8787
+```
+
+The proxy exposes `GET /v1/models` and `POST /v1/chat/completions` on `http://127.0.0.1:8787/v1`.
+
+### 2. Load the Pi extension
+
+```bash
+pi -e ./pi-extension
+```
+
+### 3. Select the model
+
+In Pi, run:
+
+```
+/model m365-copilot/default
+```
+
+Pi keeps read/write/edit/bash on the desktop; Copilot is the reasoning backend via the proxy.
+
+### Known limitations
+
+- **No native tools or system prompt** on the Substrate side — the proxy flattens OpenAI messages and **emulates** tool calling with Hermes-style `<tool_call>` XML.
+- **Auth is unchanged** — cached `tokens.json` or interactive Edge/Puppeteer sign-in (`--cached-token` / persistent profile).
+- **Non-streaming only** for now (`POST /v1/chat/completions` returns a complete response).
+- **Session continuity** is keyed by the first user message in a thread; multi-turn reuses the same Substrate `conversationId` and increments `invocationId` per turn.
+- On **Disengaged**, the proxy refreshes the Substrate conversation once and retries.
+
+### Smoke test (no Copilot auth)
+
+```bash
+copilot-cli serve --help
+pytest tests/test_tool_parser.py tests/test_message_flattener.py -q
+curl -s http://127.0.0.1:8787/v1/models   # after serve is running with valid auth
+```
 
 ## Auth model
 
@@ -131,6 +176,7 @@ First run opens a visible Edge window — sign in once. Later runs reuse the pro
 copilot-cli chat -u user@contoso.com -s officeweb
 copilot-cli whoami -u user@contoso.com --cached-token -s officeweb
 copilot-cli dump -u user@contoso.com --cached-token -s officeweb -d ./whoami_out
+copilot-cli serve -u user@contoso.com --cached-token -s officeweb --port 8787
 ```
 
 Same via module form:
@@ -153,7 +199,9 @@ Prefer `--cached-token` once `./tokens.json` already holds a substrate bearer.
 ```
 src/copilot_cli/
   cli/                 # argparse + command runners
-  copilot/             # connector, chat, whoami, dump, …
+  copilot/             # connector, chat, whoami, dump, openai_proxy, …
   common/              # token cache + file browser GUI
   puppeteer_get_substrate_bearer/   # Node auth helpers
+pi-extension/          # Pi provider registration for m365-copilot
+tests/                 # unit tests (tool parser, message flattening)
 ```

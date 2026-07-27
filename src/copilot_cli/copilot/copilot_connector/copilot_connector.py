@@ -77,6 +77,7 @@ class CopilotConnector:
         """
         self.__conversation_params = self.__get_conversation_parameters(True)
         self.__file_logger = FileLogger(f"session_{self.__conversation_params.session_id}.log")
+        self.__index = 0
 
         self.__is_initialized = True
 
@@ -100,11 +101,13 @@ class CopilotConnector:
             raise CopilotConnectionNotInitializedException("Copilot connection not initialized.")
 
         url = self.__conversation_params.url
+        prompt_message = self.__get_prompt(prompt)
+        self.__index += 1
 
         protocol_message = {"protocol": "json", "version": 1}
         ping_message = {"type": 6}
 
-        inputs = [protocol_message, ping_message, self.__get_prompt(prompt)]
+        inputs = [protocol_message, ping_message, prompt_message]
 
         async with self.__websocket_connect(url) as websocket:
             for input in inputs:

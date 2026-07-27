@@ -35,12 +35,31 @@ class ChatAutomator:
         Sends a user prompt to the copilot and gets the response as a websocket message
         """
         self.init_connector()
+        return self.__send_prompt_once(prompt)
 
-        result = asyncio.get_event_loop().run_until_complete(asyncio.gather(self.__copilot_connector.connect(prompt)))
+    def send_prompt_text(self, prompt: str) -> str:
+        """
+        Sends a user prompt and returns the Copilot reply as plain text.
 
-        if result[0]:
-            return result[0]
-        return None
+        On Disengaged, refreshes the Substrate conversation once and retries.
+        """
+        self.init_connector()
+        response = self.__send_prompt_with_disengage_retry(prompt)
+        if not response:
+            return ""
+        parsed = response.parsed_message
+        return parsed.copilot_message or ""
+
+    def __send_prompt_with_disengage_retry(self, prompt: str) -> Optional[WebsocketMessage]:
+        response = self.__send_prompt_once(prompt)
+        if response and response.parsed_message.is_disengaged:
+            self.refresh_connector()
+            response = self.__send_prompt_once(prompt)
+        return response
+
+    def __send_prompt_once(self, prompt: str) -> Optional[WebsocketMessage]:
+        # asyncio.run works in Flask worker threads (no pre-existing loop).
+        return asyncio.run(self.__copilot_connector.connect(prompt))
 
     def enable_bing_web_search(self) -> None:
         """

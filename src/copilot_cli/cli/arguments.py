@@ -3,7 +3,7 @@ import argparse
 from copilot_cli.copilot.enums.copilot_scenario_enum import CopilotScenarioEnum
 from copilot_cli.copilot.enums.verbose_enum import VerboseEnum
 
-_DESCRIPTION = "Connect to M365 Copilot (Office Business Chat or Teams) to chat, recon, dump, or browse."
+_DESCRIPTION = "Connect to M365 Copilot (Office Business Chat or Teams) to chat, recon, dump, browse, or serve."
 
 _EPILOG = """\
 examples:
@@ -11,6 +11,7 @@ examples:
   copilot-cli whoami -u user@contoso.com --cached-token -s officeweb
   copilot-cli dump -u user@contoso.com --cached-token -s officeweb -d ./whoami_out
   copilot-cli gui -d ./whoami_out
+  copilot-cli serve -u user@contoso.com --cached-token -s officeweb --port 8787
 
 auth:
   First run opens a visible Edge window (profile ~/.config/copilot-cli/msedge-profile).
@@ -104,6 +105,36 @@ def parse_arguments() -> argparse.Namespace:
         required=True,
         metavar="DIR",
         help="Data directory to browse",
+    )
+
+    serve = subparsers.add_parser(
+        "serve",
+        help="OpenAI-compatible HTTP proxy for Pi and other clients",
+        description=(
+            "Expose an OpenAI-compatible HTTP proxy so Pi and other clients can use "
+            "M365 Copilot as a model backend."
+        ),
+        formatter_class=_HelpFormatter,
+        epilog=(
+            "example:\n"
+            "  copilot-cli serve -u user@contoso.com --cached-token -s officeweb --port 8787"
+        ),
+    )
+    _add_auth_args(serve)
+    proxy = serve.add_argument_group("proxy")
+    proxy.add_argument(
+        "--port",
+        type=int,
+        default=8787,
+        metavar="PORT",
+        help="HTTP listen port (default: 8787)",
+    )
+    proxy.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        metavar="HOST",
+        help="HTTP listen address (default: 127.0.0.1)",
     )
 
     return parser.parse_args()

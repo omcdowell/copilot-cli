@@ -72,7 +72,12 @@ class InteractiveChat:
                     if result[0].parsed_message.is_disengaged:
                         print(f"{TOOL_PROMPT}Conversation is disengaged, re-initiating connection.")
                         self.__copilot_connector.refresh_connection()
-                        print(f"{TOOL_PROMPT}Connection refreshed.")
+                        print(f"{TOOL_PROMPT}Connection refreshed. Retrying prompt...")
+                        retry = asyncio.get_event_loop().run_until_complete(
+                            asyncio.gather(self.__copilot_connector.connect(prompt))
+                        )
+                        if retry[0]:
+                            print(self.__websocket_formatter.format(retry[0].parsed_message))
 
         except CopilotConnectionNotInitializedException as e:
             print(f"{TOOL_PROMPT}{e.message}")
