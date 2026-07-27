@@ -1,7 +1,8 @@
 // Description: Open M365 Copilot chat in a persistent Edge profile and capture the Substrate bearer token.
 // Trigger: loading https://m365.cloud.microsoft/chat causes the client to open
 // wss://substrate.../Chathub/...?access_token=<opaque> — that query param is the token —
-// and/or obtain a Bearer token scoped to M365Copilot.Read.All via /oauth2/v2.0/token.
+// and/or obtain a Bearer via MSAL for https://substrate.office.com/sydney/.default
+// (same scope Teams uses) and/or M365Copilot.Read.All via /oauth2/v2.0/token.
 // Access tokens must be treated as opaque (Microsoft identity platform); never require JWT shape.
 // Passwords are never accepted: sign in once in the visible Edge window.
 
@@ -18,6 +19,10 @@ const NETWORK_LOG_FILE = 'network_log.txt';
 const LOGIN_WAIT_MS = 10 * 60 * 1000;
 const TOKEN_WAIT_MS = 90 * 1000;
 const COPILOT_CHAT_URL = 'https://m365.cloud.microsoft/chat';
+/** Primary Substrate/Sydney API scope (also used by Teams capture). */
+const SYDNEY_SCOPE = 'https://substrate.office.com/sydney/.default';
+/** Alternate Graph-style scope seen on some M365 Copilot surfaces. */
+const M365_COPILOT_SCOPE = 'M365Copilot.Read.All';
 
 if (DEBUGMODE === 'true') {
   fs.writeFileSync(NETWORK_LOG_FILE, '', { encoding: 'utf8' });
@@ -71,8 +76,20 @@ function extractIdentityFromSubstrateUrl(url) {
   return { oid: match[1], tid: match[2] };
 }
 
-function scopeIncludesM365Copilot(scope) {
-  return String(scope || '').includes('M365Copilot.Read.All');
+function isSubstrateBearerScope(scope) {
+  const s = String(scope || '');
+  return s.includes(SYDNEY_SCOPE) || s.includes(M365_COPILOT_SCOPE);
+}
+
+function scopePreference(scope) {
+  const s = String(scope || '');
+  if (s.includes(SYDNEY_SCOPE)) {
+    return 2; // prefer Sydney over M365Copilot.Read.All
+  }
+  if (s.includes(M365_COPILOT_SCOPE)) {
+    return 1;
+  }
+  return 0;
 }
 
 /** Best-effort claims from a JWT-shaped string only. Opaque tokens return null. */
@@ -169,8 +186,7 @@ async function waitUntilPastLogin(page, timeoutMs) {
 }
 
 async function readCopilotTokenFromStorage(page) {
-  return page.evaluate(() => {
-    const SCOPE_MARKER = 'M365Copilot.Read.All';
+  return page.evaluate((sydneyScope, m365Scope) => {
     const identityFromHomeAccountId = (homeAccountId) => {
       if (!homeAccountId || typeof homeAccountId !== 'string') {
         return null;
@@ -181,7 +197,9 @@ async function readCopilotTokenFromStorage(page) {
       }
       return { oid: match[1], tid: match[2] };
     };
-    const fromEntry = (entry) => {
+    const entryScope = (entry) =>
+      String((entry && (entry.scope || entry.scopes || entry.target)) || '');
+    const fromEntry = (entry, matchedScope) => {
       if (!entry || typeof entry.secret !== 'string') {
         return null;
       }
@@ -190,50 +208,87 @@ async function readCopilotTokenFromStorage(page) {
         token: entry.secret,
         oid: (fromHome && fromHome.oid) || null,
         tid: (fromHome && fromHome.tid) || entry.realm || null,
-        user: entry.username || null
+        user: entry.username || null,
+        scope: matchedScope || entryScope(entry)
       };
     };
+    const scopeRank = (scope) => {
+      const s = String(scope || '');
+      if (s.includes(sydneyScope)) {
+        return 2;
+      }
+      if (s.includes(m365Scope)) {
+        return 1;
+      }
+      return 0;
+    };
+    const consider = (candidate, best) => {
+      if (!candidate || !candidate.token) {
+        return best;
+      }
+      if (!best || scopeRank(candidate.scope) > scopeRank(best.scope)) {
+        return candidate;
+      }
+      return best;
+    };
     const scan = (storage) => {
+      let best = null;
       try {
         for (const key of Object.keys(storage)) {
           const value = storage.getItem(key);
-          if (!value || !value.includes(SCOPE_MARKER)) {
+          if (!value) {
+            continue;
+          }
+          const hasSydney = value.includes(sydneyScope);
+          const hasM365 = value.includes(m365Scope);
+          if (!hasSydney && !hasM365) {
             continue;
           }
           try {
             const data = JSON.parse(value);
-            const single = fromEntry(data);
-            if (single) {
-              return single;
-            }
+            const single = fromEntry(data, hasSydney ? sydneyScope : m365Scope);
+            best = consider(single, best);
             if (Array.isArray(data)) {
               for (const entry of data) {
+                const scope = entryScope(entry);
                 if (
                   entry &&
                   typeof entry.secret === 'string' &&
-                  String(entry.scope || entry.scopes || entry.target || '').includes(SCOPE_MARKER)
+                  (scope.includes(sydneyScope) || scope.includes(m365Scope) || hasSydney || hasM365)
                 ) {
-                  const found = fromEntry(entry);
-                  if (found) {
-                    return found;
-                  }
+                  best = consider(
+                    fromEntry(
+                      entry,
+                      scope.includes(sydneyScope) || hasSydney ? sydneyScope : m365Scope
+                    ),
+                    best
+                  );
                 }
               }
             }
           } catch (_) {
             const match = value.match(/"secret"\s*:\s*"([^"]+)"/);
             if (match) {
-              return { token: match[1], oid: null, tid: null, user: null };
+              best = consider(
+                {
+                  token: match[1],
+                  oid: null,
+                  tid: null,
+                  user: null,
+                  scope: hasSydney ? sydneyScope : m365Scope
+                },
+                best
+              );
             }
           }
         }
       } catch (_) {
         // ignore
       }
-      return null;
+      return best;
     };
     return scan(localStorage) || scan(sessionStorage);
-  });
+  }, SYDNEY_SCOPE, M365_COPILOT_SCOPE);
 }
 
 (async () => {
@@ -258,14 +313,18 @@ async function readCopilotTokenFromStorage(page) {
   page.setDefaultTimeout(timeout);
 
   let bearerToken = null;
+  let bearerPreference = 0; // 0=none, 1=M365Copilot, 2=Sydney scope, 3=Substrate WS URL
   const identity = { oid: null, tid: null, user: USER || null };
   let tokenCapturedResolver;
   const tokenCapturedPromise = new Promise(resolve => {
     tokenCapturedResolver = resolve;
   });
 
-  const acceptToken = (token, source, { alreadyValidated = false, identityHint = null } = {}) => {
-    if (!token || bearerToken) {
+  const acceptToken = (token, source, { alreadyValidated = false, identityHint = null, preference = 1 } = {}) => {
+    if (!token) {
+      return;
+    }
+    if (bearerToken && preference <= bearerPreference) {
       return;
     }
     // Prefer non-token identity sources. Soft-decode JWT-shaped tokens only as a fallback
@@ -283,9 +342,9 @@ async function readCopilotTokenFromStorage(page) {
     if (!alreadyValidated) {
       if (jwtPayload) {
         const scoped =
-          scopeIncludesM365Copilot(jwtPayload.scp) ||
-          scopeIncludesM365Copilot(jwtPayload.roles) ||
-          scopeIncludesM365Copilot(jwtPayload.aud);
+          isSubstrateBearerScope(jwtPayload.scp) ||
+          isSubstrateBearerScope(jwtPayload.roles) ||
+          isSubstrateBearerScope(jwtPayload.aud);
         if (!scoped && !identityHint) {
           logMessage(`Ignoring unrelated token candidate from ${source}`);
           return;
@@ -299,9 +358,13 @@ async function readCopilotTokenFromStorage(page) {
     } else if (jwtIdentity) {
       mergeIdentity(identity, jwtIdentity);
     }
+    const upgrading = Boolean(bearerToken);
     bearerToken = token;
-    logMessage(`Bearer token captured via ${source}.`);
-    if (tokenCapturedResolver) {
+    bearerPreference = preference;
+    logMessage(`${upgrading ? 'Upgraded' : 'Captured'} bearer via ${source} (preference=${preference}).`);
+    if (tokenCapturedResolver && preference >= 2) {
+      // Resolve once we have Sydney or WS — don't finish early on weaker M365Copilot-only hits
+      // while Sydney may still appear; still resolve so race can complete if wait ends.
       tokenCapturedResolver(bearerToken);
       tokenCapturedResolver = null;
     }
@@ -318,7 +381,8 @@ async function readCopilotTokenFromStorage(page) {
     if (token) {
       acceptToken(token, 'websocket URL', {
         alreadyValidated: isSubstrateChatUrl(url),
-        identityHint: extractIdentityFromSubstrateUrl(url)
+        identityHint: extractIdentityFromSubstrateUrl(url),
+        preference: 3
       });
     }
   });
@@ -328,12 +392,13 @@ async function readCopilotTokenFromStorage(page) {
     if (token) {
       acceptToken(token, 'websocket handshake', {
         alreadyValidated: isSubstrateChatUrl(url),
-        identityHint: extractIdentityFromSubstrateUrl(url)
+        identityHint: extractIdentityFromSubstrateUrl(url),
+        preference: 3
       });
     }
   });
 
-  // Secondary: MSAL /oauth2/v2.0/token responses scoped to M365Copilot.Read.All.
+  // Secondary: MSAL /oauth2/v2.0/token responses for Sydney or M365Copilot scopes.
   page.on('response', async response => {
     try {
       const url = response.url();
@@ -358,15 +423,17 @@ async function readCopilotTokenFromStorage(page) {
           return;
         }
         const tokenType = json.token_type || json.tokenType;
+        const responseScope = json.scope || json.scopes || '';
         if (
           tokenType === 'Bearer' &&
           json.access_token &&
-          scopeIncludesM365Copilot(json.scope || json.scopes)
+          isSubstrateBearerScope(responseScope)
         ) {
-          // ID tokens are for clients; access tokens are opaque — take identity from id_token only.
-          acceptToken(json.access_token, 'oauth token response', {
+          // Prefer Sydney scope when both could appear; ID tokens are for clients.
+          acceptToken(json.access_token, `oauth token response (${responseScope})`, {
             alreadyValidated: true,
-            identityHint: identityFromJwtOrIdToken(json.id_token)
+            identityHint: identityFromJwtOrIdToken(json.id_token),
+            preference: scopePreference(responseScope)
           });
         }
       }
@@ -398,38 +465,46 @@ async function readCopilotTokenFromStorage(page) {
     logMessage('Existing Edge profile session detected; waiting for Substrate WebSocket...');
   }
 
-  // Tertiary: poll MSAL/localStorage while chat boots.
+  // Tertiary: poll MSAL/localStorage while chat boots (prefer sydney/.default over M365Copilot.Read.All).
   const storagePoll = (async () => {
     const deadline = Date.now() + TOKEN_WAIT_MS;
-    while (!bearerToken && Date.now() < deadline) {
+    while (Date.now() < deadline) {
+      if (bearerPreference >= 2) {
+        return bearerToken;
+      }
       try {
         const fromStorage = await readCopilotTokenFromStorage(page);
         if (fromStorage && fromStorage.token) {
-          acceptToken(fromStorage.token, 'local/session storage', {
+          acceptToken(fromStorage.token, `local/session storage (${fromStorage.scope || 'unknown scope'})`, {
             alreadyValidated: true,
             identityHint: {
               oid: fromStorage.oid,
               tid: fromStorage.tid,
               user: fromStorage.user
-            }
+            },
+            preference: scopePreference(fromStorage.scope)
           });
-          return;
+          if (bearerPreference >= 2) {
+            return bearerToken;
+          }
         }
       } catch (_) {
         // page may be navigating
       }
       await delay(2000);
     }
+    return bearerToken;
   })();
 
   logMessage(
-    'Token trigger: open Copilot chat so the page connects to substrate Chathub with access_token= in the WS URL. ' +
+    'Token trigger: open Copilot chat so the page connects to substrate Chathub with access_token= in the WS URL, ' +
+    `or wait for MSAL cache entry for ${SYDNEY_SCOPE}. ` +
     'If chat does not load, open Chat manually in the Edge window.'
   );
 
   await Promise.race([
     tokenCapturedPromise,
-    storagePoll.then(() => bearerToken),
+    storagePoll,
     delay(TOKEN_WAIT_MS).then(() => null)
   ]);
 
