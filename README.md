@@ -11,7 +11,6 @@ Programmatically connect to Microsoft 365 Copilot (Office Business Chat or Teams
 | `chat` | Interactive Copilot session |
 | `whoami` | User/context recon through Copilot |
 | `dump` | Exfil-style data dump from whoami recon |
-| `spear-phishing` | Craft personalized emails via Copilot |
 | `gui` | Browse collected output locally |
 
 ## Auth model

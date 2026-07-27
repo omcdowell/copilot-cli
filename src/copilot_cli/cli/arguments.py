@@ -33,9 +33,6 @@ Override with COPILOT_CLI_BROWSER_PROFILE. Sign in once in the visible Edge wind
     dump.add_argument("-d", "--directory", type=str, required=True, help="Path to whoami output directory")
     dump.add_argument("-g", "--gui", action="store_true", help="Browse dump output in a local GUI")
 
-    spear = subparsers.add_parser("spear-phishing", help="Craft personalized emails via Copilot (research tool)")
-    _add_auth_args(spear)
-
     gui = subparsers.add_parser("gui", help="Browse collected data in a local GUI")
     gui.add_argument("-d", "--directory", type=str, required=True, help="Data directory")
 
