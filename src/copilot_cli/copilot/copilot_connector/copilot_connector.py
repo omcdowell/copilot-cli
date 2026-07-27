@@ -2,7 +2,8 @@ import os
 import pathlib
 import subprocess  # nosec
 import uuid
-from typing import Optional
+from collections.abc import Callable
+from typing import Any, Optional
 
 import jwt
 import requests
@@ -13,9 +14,15 @@ from copilot_cli.common.cache.token_cache import TokenCache
 from copilot_cli.copilot.enums.copilot_scenario_enum import CopilotScenarioEnum
 from copilot_cli.copilot.enums.message_type_enum import MessageTypeEnum
 from copilot_cli.copilot.enums.verbose_enum import VerboseEnum
-from copilot_cli.copilot.exceptions.copilot_connected_user_mismatch import CopilotConnectedUserMismatchException
-from copilot_cli.copilot.exceptions.copilot_connection_failed_exception import CopilotConnectionFailedException
-from copilot_cli.copilot.exceptions.copilot_connection_not_initialized_exception import CopilotConnectionNotInitializedException
+from copilot_cli.copilot.exceptions.copilot_connected_user_mismatch import (
+    CopilotConnectedUserMismatchException,
+)
+from copilot_cli.copilot.exceptions.copilot_connection_failed_exception import (
+    CopilotConnectionFailedException,
+)
+from copilot_cli.copilot.exceptions.copilot_connection_not_initialized_exception import (
+    CopilotConnectionNotInitializedException,
+)
 from copilot_cli.copilot.loggers.file_logger import FileLogger
 from copilot_cli.copilot.models.agent_info_model import AgentInfoModel
 from copilot_cli.copilot.models.chat_argument import ChatArguments
@@ -35,12 +42,21 @@ class CopilotConnector:
     _SUBSTRATE_TID_CACHE_KEY = "substrate_tid"
     _SUBSTRATE_USER_CACHE_KEY = "substrate_user"
 
-    def __init__(self, arguments: ChatArguments) -> None:
+    def __init__(
+        self,
+        arguments: ChatArguments,
+        *,
+        token_cache: Optional[TokenCache] = None,
+        websocket_connect: Optional[Callable[..., Any]] = None,
+        http_get: Optional[Callable[..., Any]] = None,
+    ) -> None:
         self.__is_initialized = False
         self.__arguments = arguments
         self.__conversation_params: Optional[ConversationParameters] = None
         self.__index = 0
-        self.__token_cache = TokenCache()
+        self.__token_cache = token_cache or TokenCache()
+        self.__websocket_connect = websocket_connect or websockets.connect
+        self.__http_get = http_get or requests.get
         self.__file_logger: Optional[FileLogger] = None
 
     def init_connection(self) -> None:
@@ -90,7 +106,7 @@ class CopilotConnector:
 
         inputs = [protocol_message, ping_message, self.__get_prompt(prompt)]
 
-        async with websockets.connect(url) as websocket:
+        async with self.__websocket_connect(url) as websocket:
             for input in inputs:
                 payload = WebsocketMessage.to_websocket_message(input)
                 websocket_payload = WebsocketMessage(payload)
@@ -102,8 +118,7 @@ class CopilotConnector:
                     response = await websocket.recv()
                     websocket_message = WebsocketMessage(response)
                     self.__log(websocket_message)
-                    parsed_message = websocket_message.parsed_message
-                    interaction_type = parsed_message.type
+                    interaction_type = websocket_message.type()
 
                     if (
                         interaction_type in (MessageTypeEnum.none, MessageTypeEnum.copilot_final, MessageTypeEnum.unknown)
@@ -393,7 +408,7 @@ class CopilotConnector:
 
         headers = {"Authorization": f"Bearer {access_token}", "X-Scenario": "officeweb"}
 
-        agents_response = requests.get(url, headers=headers)  # nosec
+        agents_response = self.__http_get(url, headers=headers)  # nosec
         if agents_response.status_code != 200:
             if agents_response.status_code == 401:
                 raise CopilotConnectionFailedException("Unauthorized. Try to delete cached token and retry")
