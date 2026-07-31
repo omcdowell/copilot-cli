@@ -3,63 +3,145 @@ import argparse
 from copilot_cli.copilot.enums.copilot_scenario_enum import CopilotScenarioEnum
 from copilot_cli.copilot.enums.verbose_enum import VerboseEnum
 
+_DESCRIPTION = "Connect to M365 Copilot (Office Business Chat or Teams) to chat, recon, dump, or browse."
+
+_EPILOG = """\
+examples:
+  copilot-cli chat -u user@contoso.com -s officeweb
+  copilot-cli whoami -u user@contoso.com --cached-token -s officeweb
+  copilot-cli dump -u user@contoso.com --cached-token -s officeweb -d ./whoami_out
+  copilot-cli gui -d ./whoami_out
+
+auth:
+  First run opens a visible Edge window (profile ~/.config/copilot-cli/msedge-profile).
+  Sign in once; later runs reuse cookies. Prefer --cached-token once tokens.json exists.
+  Override profile with COPILOT_CLI_BROWSER_PROFILE. No passwords on the CLI.
+
+Run "copilot-cli <command> -h" for command-specific options.
+"""
+
+
+class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    def __init__(self, prog: str) -> None:
+        super().__init__(prog, max_help_position=30, width=100)
+
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="copilot-cli",
-        description="Standalone M365 Copilot CLI — connect and interact with Copilot365 in Office/Teams.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  copilot-cli chat -u user@example.com -s officeweb
-  copilot-cli whoami -u user@example.com --cached-token -s officeweb
-  copilot-cli dump -u user@example.com --cached-token -s officeweb -d ./whoami_out
-
-Auth uses a persistent Microsoft Edge profile (default ~/.config/copilot-cli/msedge-profile).
-Override with COPILOT_CLI_BROWSER_PROFILE. Sign in once in the visible Edge window; no passwords.
-        """,
+        description=_DESCRIPTION,
+        formatter_class=_HelpFormatter,
+        epilog=_EPILOG,
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="COMMAND",
+    )
 
-    chat = subparsers.add_parser("chat", help="Interactive chat with Copilot365")
+    chat = subparsers.add_parser(
+        "chat",
+        help="Interactive chat with Copilot365",
+        description="Start an interactive Copilot365 chat session over the Substrate websocket.",
+        formatter_class=_HelpFormatter,
+        epilog="example:\n  copilot-cli chat -u user@contoso.com -s officeweb",
+    )
     _add_auth_args(chat)
 
-    whoami = subparsers.add_parser("whoami", help="Recon: identify user context via Copilot")
+    whoami = subparsers.add_parser(
+        "whoami",
+        help="Identify user context via Copilot",
+        description="Run recon prompts through Copilot to identify the signed-in user and context.",
+        formatter_class=_HelpFormatter,
+        epilog="example:\n  copilot-cli whoami -u user@contoso.com --cached-token -s officeweb",
+    )
     _add_auth_args(whoami)
-    whoami.add_argument("-g", "--gui", action="store_true", help="Browse whoami output in a local GUI")
+    whoami.add_argument(
+        "-g",
+        "--gui",
+        action="store_true",
+        help="Open the whoami output directory in the local GUI when finished",
+    )
 
-    dump = subparsers.add_parser("dump", help="Dump documents/emails using whoami recon output")
+    dump = subparsers.add_parser(
+        "dump",
+        help="Dump documents/emails from whoami output",
+        description="Dump documents and emails using a prior whoami recon output directory.",
+        formatter_class=_HelpFormatter,
+        epilog=(
+            "example:\n"
+            "  copilot-cli dump -u user@contoso.com --cached-token -s officeweb -d ./whoami_out"
+        ),
+    )
     _add_auth_args(dump)
-    dump.add_argument("-d", "--directory", type=str, required=True, help="Path to whoami output directory")
-    dump.add_argument("-g", "--gui", action="store_true", help="Browse dump output in a local GUI")
+    dump.add_argument(
+        "-d",
+        "--directory",
+        type=str,
+        required=True,
+        metavar="DIR",
+        help="Path to whoami output directory",
+    )
+    dump.add_argument(
+        "-g",
+        "--gui",
+        action="store_true",
+        help="Open the dump output directory in the local GUI when finished",
+    )
 
-    gui = subparsers.add_parser("gui", help="Browse collected data in a local GUI")
-    gui.add_argument("-d", "--directory", type=str, required=True, help="Data directory")
+    gui = subparsers.add_parser(
+        "gui",
+        help="Browse collected data in a local GUI",
+        description="Serve a local file browser for a whoami or dump output directory.",
+        formatter_class=_HelpFormatter,
+        epilog="example:\n  copilot-cli gui -d ./whoami_out",
+    )
+    gui.add_argument(
+        "-d",
+        "--directory",
+        type=str,
+        required=True,
+        metavar="DIR",
+        help="Data directory to browse",
+    )
 
     return parser.parse_args()
 
 
 def _add_auth_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("-u", "--user", required=True, type=str, help="User email to connect")
-    parser.add_argument(
+    auth = parser.add_argument_group("auth")
+    auth.add_argument(
+        "-u",
+        "--user",
+        required=True,
+        metavar="EMAIL",
+        type=str,
+        help="User email to connect as",
+    )
+    auth.add_argument(
         "--cached-token",
         action="store_true",
-        help="Use cached substrate access token from tokens.json if present",
+        help="Use substrate_access_token from ./tokens.json when present",
     )
-    parser.add_argument(
+    auth.add_argument(
         "-s",
         "--scenario",
         required=True,
+        metavar="SCENARIO",
         type=str,
         choices=[s.value for s in CopilotScenarioEnum],
         help="Copilot surface: officeweb (Business Chat) or teamshub (Teams)",
     )
-    parser.add_argument(
+
+    session = parser.add_argument_group("session")
+    session.add_argument(
         "-v",
         "--verbose",
         required=False,
+        metavar="LEVEL",
         type=str,
         default=VerboseEnum.off.value,
         choices=[v.value for v in VerboseEnum],
-        help="Session log verbosity. Default: off",
+        help="Session log verbosity (default: off)",
     )
