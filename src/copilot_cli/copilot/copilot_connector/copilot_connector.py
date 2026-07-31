@@ -1,8 +1,12 @@
+from __future__ import annotations
+
+import json
 import os
 import pathlib
 import subprocess  # nosec
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import jwt
@@ -27,9 +31,18 @@ from copilot_cli.copilot.loggers.file_logger import FileLogger
 from copilot_cli.copilot.models.agent_info_model import AgentInfoModel
 from copilot_cli.copilot.models.chat_argument import ChatArguments
 from copilot_cli.copilot.models.conversation_parameters import ConversationParameters
+from copilot_cli.copilot.websocket_message.substrate_deltas import fallback_bot_text, write_at_cursor_delta
 from copilot_cli.copilot.websocket_message.websocket_message import WebsocketMessage
 
 TOOL_PROMPT = "[Tool]: "
+
+
+@dataclass
+class StreamOutcome:
+    """Filled by connect_stream as the Substrate turn progresses."""
+
+    is_disengaged: bool = False
+    deltas_yielded: bool = False
 
 
 class CopilotConnector:
@@ -134,6 +147,83 @@ class CopilotConnector:
                         elif interaction_type == MessageTypeEnum.unknown:
                             print(f"{TOOL_PROMPT} Got unknown message type : {websocket_message.message}")
 
+    async def connect_stream(self, prompt: str, outcome: Optional[StreamOutcome] = None) -> AsyncIterator[str]:
+        """
+        Connect and yield Substrate writeAtCursor text deltas as they arrive.
+
+        Falls back to the final bot text when the hub never emitted deltas
+        (same behaviour as kuchris/m365-copilot-openai-proxy). Existing chat /
+        whoami / dump paths keep using connect().
+        """
+        if not self.__is_initialized:
+            raise CopilotConnectionNotInitializedException("Copilot connection not initialized.")
+
+        if outcome is None:
+            outcome = StreamOutcome()
+
+        url = self.__conversation_params.url
+        prompt_message = self.__get_prompt(prompt)
+        self.__index += 1
+
+        async with websockets.connect(url) as websocket:
+            handshake = WebsocketMessage.to_websocket_message({"protocol": "json", "version": 1})
+            self.__log(WebsocketMessage(handshake))
+            await websocket.send(handshake)
+            ack = await websocket.recv()
+            self.__log(WebsocketMessage(ack))
+
+            payload = WebsocketMessage.to_websocket_message(prompt_message)
+            self.__log(WebsocketMessage(payload))
+            await websocket.send(payload)
+
+            fallback_text = ""
+            async for raw in websocket:
+                for part in str(raw).split(WebsocketMessage.SIGNALR_SEP):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    try:
+                        msg = json.loads(part)
+                    except json.JSONDecodeError:
+                        continue
+
+                    msg_type = msg.get("type", -1)
+                    if msg_type == 6:
+                        continue
+
+                    delta = write_at_cursor_delta(msg)
+                    if delta:
+                        if not outcome.deltas_yielded and fallback_text:
+                            outcome.deltas_yielded = True
+                            yield fallback_text
+                        outcome.deltas_yielded = True
+                        yield delta
+
+                    maybe_fallback = fallback_bot_text(msg)
+                    if maybe_fallback:
+                        fallback_text = maybe_fallback
+
+                    if msg_type == 2:
+                        # Reuse final-frame parsing for Disengaged detection.
+                        frame = WebsocketMessage(part + WebsocketMessage.SIGNALR_SEP)
+                        parsed = frame.parsed_message
+                        if parsed.is_disengaged:
+                            outcome.is_disengaged = True
+                            if parsed.copilot_message:
+                                fallback_text = parsed.copilot_message
+                        elif parsed.copilot_message:
+                            fallback_text = parsed.copilot_message
+
+                    if msg_type == 3:
+                        if not outcome.deltas_yielded and fallback_text:
+                            outcome.deltas_yielded = True
+                            yield fallback_text
+                        return
+
+            if not outcome.deltas_yielded and fallback_text:
+                outcome.deltas_yielded = True
+                yield fallback_text
+
     def enable_bing_web_search(self) -> None:
         if not self.__is_initialized:
             raise CopilotConnectionNotInitializedException("Copilot connection not initialized.")
@@ -193,6 +283,7 @@ class CopilotConnector:
                         "enterprise_flux_work_code_interpreter",
                         "enable_batch_token_processing",
                     ],
+                    "streamingMode": "ConciseWithPadding",
                     "options": {},
                     "allowedMessageTypes": [
                         "Chat",

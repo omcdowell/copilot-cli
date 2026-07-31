@@ -1,7 +1,10 @@
 import asyncio
+import queue
+import threading
+from collections.abc import Iterator
 from typing import Optional
 
-from copilot_cli.copilot.copilot_connector.copilot_connector import CopilotConnector
+from copilot_cli.copilot.copilot_connector.copilot_connector import CopilotConnector, StreamOutcome
 from copilot_cli.copilot.models.chat_argument import ChatArguments
 from copilot_cli.copilot.websocket_message.websocket_message import WebsocketMessage
 
@@ -44,18 +47,54 @@ class ChatAutomator:
         On Disengaged, refreshes the Substrate conversation once and retries.
         """
         self.init_connector()
-        response = self.__send_prompt_with_disengage_retry(prompt)
-        if not response:
-            return ""
-        parsed = response.parsed_message
-        return parsed.copilot_message or ""
+        for attempt in range(2):
+            outcome = StreamOutcome()
+            text = "".join(self.__iter_prompt_once(prompt, outcome))
+            if outcome.is_disengaged and attempt == 0:
+                self.refresh_connector()
+                continue
+            return text
+        return ""
 
-    def __send_prompt_with_disengage_retry(self, prompt: str) -> Optional[WebsocketMessage]:
-        response = self.__send_prompt_once(prompt)
-        if response and response.parsed_message.is_disengaged:
-            self.refresh_connector()
-            response = self.__send_prompt_once(prompt)
-        return response
+    def iter_prompt_text(self, prompt: str) -> Iterator[str]:
+        """
+        Yield Substrate text deltas as they arrive (writeAtCursor).
+
+        Falls back to a single full-text chunk when the hub does not stream.
+        Live path does not retry Disengaged mid-stream (client may already have
+        partial tokens); send_prompt_text still retries for buffered callers.
+        """
+        self.init_connector()
+        yield from self.__iter_prompt_once(prompt, StreamOutcome())
+
+    def __iter_prompt_once(self, prompt: str, outcome: StreamOutcome) -> Iterator[str]:
+        """Bridge async connect_stream to a sync iterator for Flask workers."""
+        q: queue.Queue = queue.Queue()
+        sentinel = object()
+
+        def worker() -> None:
+            async def consume() -> None:
+                try:
+                    async for delta in self.__copilot_connector.connect_stream(prompt, outcome):
+                        q.put(delta)
+                except Exception as exc:  # noqa: BLE001 — re-raised on consumer side
+                    q.put(exc)
+                finally:
+                    q.put(sentinel)
+
+            asyncio.run(consume())
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        while True:
+            item = q.get()
+            if item is sentinel:
+                break
+            if isinstance(item, Exception):
+                thread.join(timeout=5)
+                raise item
+            yield item
+        thread.join(timeout=5)
 
     def __send_prompt_once(self, prompt: str) -> Optional[WebsocketMessage]:
         # asyncio.run works in Flask worker threads (no pre-existing loop).

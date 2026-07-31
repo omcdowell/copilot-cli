@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 from flask import Flask, Response, jsonify, request
@@ -11,11 +12,10 @@ from flask import Flask, Response, jsonify, request
 from copilot_cli.copilot.models.chat_argument import ChatArguments
 from copilot_cli.copilot.openai_proxy.message_flattener import (
     build_continuation_prompt,
-    count_user_messages,
     flatten_messages,
 )
 from copilot_cli.copilot.openai_proxy.session_store import SessionStore
-from copilot_cli.copilot.openai_proxy.stream_chunks import iter_completion_sse
+from copilot_cli.copilot.openai_proxy.stream_chunks import iter_live_sse
 from copilot_cli.copilot.openai_proxy.tool_parser import parse_tool_calls, to_openai_tool_calls
 
 DEFAULT_MODEL_ID = "m365-copilot"
@@ -57,7 +57,7 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
         model = payload.get("model", DEFAULT_MODEL_ID)
         tools = payload.get("tools")
         session_key = SessionStore.session_key_from_request(request, messages)
-        is_new_conversation = count_user_messages(messages) <= 1
+        is_new_conversation = session_store.is_new_conversation(request, messages, session_key)
 
         if is_new_conversation:
             prompt = flatten_messages(messages, tools)
@@ -68,6 +68,45 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
                     {"error": {"message": "No continuation content found", "type": "invalid_request_error"}}
                 ), 400
 
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        want_stream = bool(payload.get("stream"))
+
+        if want_stream:
+
+            def live_events() -> Iterator[str]:
+                with session_store.lock_session(session_key):
+                    automator = session_store.get_automator(session_key, is_new_conversation)
+
+                    def deltas() -> Iterator[str]:
+                        saw_text = False
+                        for chunk in automator.iter_prompt_text(prompt):
+                            if chunk:
+                                saw_text = True
+                            yield chunk
+                        # Empty tool replies are usually a stuck Substrate session.
+                        if not saw_text and tools:
+                            automator_retry = session_store.reset_session(session_key)
+                            yield from automator_retry.iter_prompt_text(prompt)
+
+                    yield from iter_live_sse(
+                        completion_id=completion_id,
+                        created=created,
+                        model=model,
+                        deltas=deltas(),
+                        watch_tools=bool(tools),
+                    )
+
+            return Response(
+                live_events(),
+                mimetype="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         with session_store.lock_session(session_key):
             automator = session_store.get_automator(session_key, is_new_conversation)
             response_text = automator.send_prompt_text(prompt)
@@ -76,27 +115,6 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
                 response_text = automator.send_prompt_text(prompt)
 
         content, parsed_tool_calls = parse_tool_calls(response_text)
-        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
-        created = int(time.time())
-        want_stream = bool(payload.get("stream"))
-
-        if want_stream:
-            # Copilot returns a full reply; synthesize OpenAI SSE so Pi gets finish_reason.
-            return Response(
-                iter_completion_sse(
-                    completion_id=completion_id,
-                    created=created,
-                    model=model,
-                    content=content if parsed_tool_calls else response_text,
-                    tool_calls=parsed_tool_calls,
-                ),
-                mimetype="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
 
         if parsed_tool_calls:
             message: dict[str, Any] = {

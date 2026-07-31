@@ -13,6 +13,8 @@ SUGGESTIONS = "Suggestions:"
 
 class WebsocketMessage(IWebsocketMessage):
     __SPECIAL_CHAR: Final[str] = chr(30)
+    # Public alias for SignalR record separator (type-1 streaming splits on this).
+    SIGNALR_SEP: Final[str] = chr(30)
 
     def __init__(self, message: str):
         self.__message = message

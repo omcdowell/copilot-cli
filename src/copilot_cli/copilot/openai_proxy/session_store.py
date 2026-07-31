@@ -12,6 +12,7 @@ from flask import Request
 
 from copilot_cli.copilot.chat_automator.chat_automator import ChatAutomator
 from copilot_cli.copilot.models.chat_argument import ChatArguments
+from copilot_cli.copilot.openai_proxy.message_flattener import count_user_messages
 
 
 class SessionStore:
@@ -22,10 +23,17 @@ class SessionStore:
         self._meta_lock = threading.Lock()
 
     @staticmethod
-    def session_key_from_request(request: Request, messages: list[Any]) -> str:
+    def session_header(request: Request) -> str | None:
         header = request.headers.get("X-Session-Id") or request.headers.get("X-Chat-Id")
+        if header and header.strip():
+            return header.strip()
+        return None
+
+    @staticmethod
+    def session_key_from_request(request: Request, messages: list[Any]) -> str:
+        header = SessionStore.session_header(request)
         if header:
-            return f"hdr_{header.strip()}"
+            return f"hdr_{header}"
         return SessionStore.session_key_from_messages(messages)
 
     @staticmethod
@@ -40,6 +48,21 @@ class SessionStore:
                 digest = hashlib.sha256(str(content).encode("utf-8")).hexdigest()[:16]
                 return f"thread_{digest}"
         return "thread_default"
+
+    def has_session(self, session_key: str) -> bool:
+        with self._meta_lock:
+            return session_key in self._sessions
+
+    def is_new_conversation(self, request: Request, messages: list[Any], session_key: str) -> bool:
+        """
+        Decide whether this request should start a fresh Substrate conversation.
+
+        With X-Session-Id / X-Chat-Id: new only on first sight of that ID.
+        Without a header (compat): fall back to counting user messages.
+        """
+        if SessionStore.session_header(request):
+            return not self.has_session(session_key)
+        return count_user_messages(messages) <= 1
 
     def _lock_for(self, session_key: str) -> threading.Lock:
         with self._meta_lock:
