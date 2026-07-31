@@ -193,9 +193,9 @@ class CopilotConnector:
 
                     delta = write_at_cursor_delta(msg)
                     if delta:
-                        if not outcome.deltas_yielded and fallback_text:
-                            outcome.deltas_yielded = True
-                            yield fallback_text
+                        # Never flush fallback_text once deltas flow: update frames
+                        # echo conversation history, so on turn 2+ it holds the
+                        # PREVIOUS bot answer and flushing it duplicates output.
                         outcome.deltas_yielded = True
                         yield delta
 
