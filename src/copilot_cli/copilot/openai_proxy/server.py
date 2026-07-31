@@ -15,7 +15,7 @@ from copilot_cli.copilot.openai_proxy.message_flattener import (
     flatten_messages,
 )
 from copilot_cli.copilot.openai_proxy.session_store import SessionStore
-from copilot_cli.copilot.openai_proxy.stream_chunks import iter_completion_sse
+from copilot_cli.copilot.openai_proxy.stream_chunks import iter_streaming_completion
 from copilot_cli.copilot.openai_proxy.tool_parser import parse_tool_calls, to_openai_tool_calls
 
 DEFAULT_MODEL_ID = "m365-copilot"
@@ -68,35 +68,53 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
                     {"error": {"message": "No continuation content found", "type": "invalid_request_error"}}
                 ), 400
 
-        with session_store.lock_session(session_key):
-            automator = session_store.get_automator(session_key, is_new_conversation)
-            response_text = automator.send_prompt_text(prompt)
-            if not response_text and tools:
-                automator = session_store.reset_session(session_key)
-                response_text = automator.send_prompt_text(prompt)
-
-        content, parsed_tool_calls = parse_tool_calls(response_text)
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
         want_stream = bool(payload.get("stream"))
 
+        def run_copilot_turn() -> str:
+            with session_store.lock_session(session_key):
+                automator = session_store.get_automator(session_key, is_new_conversation)
+                text = automator.send_prompt_text(prompt)
+                if not text and tools:
+                    automator = session_store.reset_session(session_key)
+                    text = automator.send_prompt_text(prompt)
+                return text
+
         if want_stream:
-            # Copilot returns a full reply; synthesize OpenAI SSE so Pi gets finish_reason.
+            # Copilot returns one full reply; synthesize OpenAI SSE so Pi gets
+            # finish_reason. The turn runs inside the generator: headers and the
+            # role chunk go out immediately, pings keep the connection alive
+            # during slow first-message auth, and automator failures become
+            # in-stream OpenAI error frames instead of HTML 500s.
             return Response(
-                iter_completion_sse(
+                iter_streaming_completion(
                     completion_id=completion_id,
                     created=created,
                     model=model,
-                    content=content if parsed_tool_calls else response_text,
-                    tool_calls=parsed_tool_calls,
+                    produce=run_copilot_turn,
                 ),
                 mimetype="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
                     "X-Accel-Buffering": "no",
                 },
             )
+
+        try:
+            response_text = run_copilot_turn()
+        except Exception as exc:  # noqa: BLE001 — surface upstream failures as JSON
+            return jsonify(
+                {
+                    "error": {
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "type": "copilot_proxy_error",
+                        "code": "upstream_error",
+                    }
+                }
+            ), 502
+
+        content, parsed_tool_calls = parse_tool_calls(response_text)
 
         if parsed_tool_calls:
             message: dict[str, Any] = {
