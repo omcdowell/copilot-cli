@@ -71,6 +71,7 @@ class CopilotConnector:
         self.__websocket_connect = websocket_connect or websockets.connect
         self.__http_get = http_get or requests.get
         self.__file_logger: Optional[FileLogger] = None
+        self.__client_correlation_id = str(uuid.uuid4())
 
     def init_connection(self) -> None:
         """
@@ -256,6 +257,10 @@ class CopilotConnector:
 
     def __get_prompt(self, prompt: str) -> dict:
         is_start_of_session = self.__index == 0
+        # Substrate keys each turn (and its bot reply) by requestId. Reusing an
+        # id across turns collides with the previous message and the reply comes
+        # back with the prior answer prepended — fresh ids per message.
+        request_id = uuid.uuid4().hex
         used_agent_params = {}
         if len(self.__conversation_params.used_agent) > 0:
             used_agent = self.__conversation_params.used_agent[0]
@@ -265,7 +270,7 @@ class CopilotConnector:
             "arguments": [
                 {
                     "source": self.__arguments.scenario.value,
-                    "clientCorrelationId": "60c2ee92-64f1-cef5-555a-b7ad5ad2c21c",
+                    "clientCorrelationId": self.__client_correlation_id,
                     "sessionId": self.__conversation_params.session_id,
                     "optionsSets": [
                         "enterprise_flux_web",
@@ -304,7 +309,7 @@ class CopilotConnector:
                     "sliceIds": [],
                     "threadLevelGptId": used_agent_params,
                     "conversationId": self.__conversation_params.conversation_id,
-                    "traceId": "6eaf112117f7ecbfa4cef5495f098e59",
+                    "traceId": request_id,
                     "isStartOfSession": is_start_of_session,
                     "productThreadType": "Office",
                     "clientInfo": {"clientPlatform": "web"},
@@ -313,7 +318,7 @@ class CopilotConnector:
                         "inputMethod": "Keyboard",
                         "text": prompt,
                         "entityAnnotationTypes": ["People", "File", "Event", "Email", "TeamsMessage"],
-                        "requestId": "6eaf112117f7ecbfa4cef5495f098e59",
+                        "requestId": request_id,
                         "locationInfo": {"timeZoneOffset": 3, "timeZone": "Asia/Jerusalem"},
                         "locale": "en-US",
                         "messageType": "Chat",

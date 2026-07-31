@@ -161,3 +161,53 @@ def test_init_connection_fails_cleanly_when_oid_tid_unresolved_for_opaque_token(
         connector.init_connection()
 
     jwt_decode.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_each_turn_sends_a_fresh_request_id(
+    chat_args: ChatArguments,
+    token_cache: TokenCache,
+) -> None:
+    """Substrate keys turns by requestId; reuse makes turn 2 collide with turn 1
+    and the reply comes back with the previous answer duplicated in front."""
+    responses = [
+        _ws_frame({"protocol": "json", "version": 1}),
+        _ws_frame({"type": 6}),
+        _copilot_final_frame("first answer"),
+        _ws_frame({"protocol": "json", "version": 1}),
+        _ws_frame({"type": 6}),
+        _copilot_final_frame("second answer"),
+    ]
+    fake_ws = FakeWebSocket(responses)
+
+    agents_response = MagicMock()
+    agents_response.status_code = 200
+    agents_response.json.return_value = {"gptList": []}
+
+    connector = CopilotConnector(
+        chat_args,
+        token_cache=token_cache,
+        websocket_connect=lambda _url: fake_ws,
+        http_get=lambda *args, **kwargs: agents_response,
+    )
+    connector.init_connection()
+
+    await connector.connect("first prompt")
+    await connector.connect("second prompt")
+
+    chat_payloads = [
+        json.loads(sent.split(_WS_DELIM)[0])
+        for sent in fake_ws.sent
+        if json.loads(sent.split(_WS_DELIM)[0]).get("type") == 4
+    ]
+    assert len(chat_payloads) == 2
+    first_args, second_args = (p["arguments"][0] for p in chat_payloads)
+
+    assert first_args["message"]["requestId"] != second_args["message"]["requestId"]
+    assert first_args["traceId"] != second_args["traceId"]
+    # traceId and requestId must agree within a turn.
+    assert first_args["traceId"] == first_args["message"]["requestId"]
+    assert second_args["traceId"] == second_args["message"]["requestId"]
+    # Turn ordering flags must still advance.
+    assert first_args["isStartOfSession"] is True
+    assert second_args["isStartOfSession"] is False
