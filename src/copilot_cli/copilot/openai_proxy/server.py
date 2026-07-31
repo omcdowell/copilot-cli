@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 from copilot_cli.copilot.models.chat_argument import ChatArguments
 from copilot_cli.copilot.openai_proxy.message_flattener import (
@@ -15,6 +15,7 @@ from copilot_cli.copilot.openai_proxy.message_flattener import (
     flatten_messages,
 )
 from copilot_cli.copilot.openai_proxy.session_store import SessionStore
+from copilot_cli.copilot.openai_proxy.stream_chunks import iter_completion_sse
 from copilot_cli.copilot.openai_proxy.tool_parser import parse_tool_calls, to_openai_tool_calls
 
 DEFAULT_MODEL_ID = "m365-copilot"
@@ -77,6 +78,25 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
         content, parsed_tool_calls = parse_tool_calls(response_text)
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
+        want_stream = bool(payload.get("stream"))
+
+        if want_stream:
+            # Copilot returns a full reply; synthesize OpenAI SSE so Pi gets finish_reason.
+            return Response(
+                iter_completion_sse(
+                    completion_id=completion_id,
+                    created=created,
+                    model=model,
+                    content=content if parsed_tool_calls else response_text,
+                    tool_calls=parsed_tool_calls,
+                ),
+                mimetype="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
         if parsed_tool_calls:
             message: dict[str, Any] = {
