@@ -88,6 +88,7 @@ def test_live_sse_holdback_streams_prose_then_tool_calls():
             model="default",
             deltas=iter(deltas),
             watch_tools=True,
+            allowed_tool_names={"read"},
         )
     )
     payloads = _parse_sse(frames)
@@ -120,3 +121,142 @@ def test_live_sse_holdback_flushes_when_no_tool_tag():
     payloads = _parse_sse(frames)
     assert "".join(_content_pieces(payloads)) == "Hello world"
     assert payloads[-2]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_live_sse_streams_prose_after_tool_call():
+    deltas = [
+        "Before.\n",
+        "<tool_call>\n",
+        '{"name": "read", "arguments": {"path": "a.py"}}\n',
+        "</tool_call>\n",
+        "After.",
+    ]
+    frames = list(
+        iter_live_sse(
+            completion_id="chatcmpl-after",
+            created=6,
+            model="default",
+            deltas=iter(deltas),
+            watch_tools=True,
+            allowed_tool_names={"read"},
+        )
+    )
+    payloads = _parse_sse(frames)
+    content = "".join(_content_pieces(payloads))
+
+    assert "Before." in content
+    assert "After." in content
+    assert TOOL_OPEN_TAG not in content
+    assert payloads[-2]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_live_sse_salvages_unclosed_tool_call():
+    deltas = [
+        "I'll read it.\n",
+        '<tool_call>{"name": "read", "arguments": {"path": "a.py"}}',
+    ]
+    frames = list(
+        iter_live_sse(
+            completion_id="chatcmpl-salvage",
+            created=7,
+            model="default",
+            deltas=iter(deltas),
+            watch_tools=True,
+            allowed_tool_names={"read"},
+        )
+    )
+    payloads = _parse_sse(frames)
+    content = "".join(_content_pieces(payloads))
+
+    assert content == "I'll read it.\n"
+    assert "<tool_call>" not in content
+    assert payloads[-2]["choices"][0]["finish_reason"] == "tool_calls"
+    tool_delta = next(
+        p["choices"][0]["delta"]["tool_calls"][0]
+        for p in payloads
+        if isinstance(p, dict) and "tool_calls" in p["choices"][0]["delta"]
+    )
+    assert tool_delta["function"]["name"] == "read"
+
+
+def test_live_sse_suppresses_unclosed_invalid_tool_call():
+    deltas = [
+        "Here we go.\n",
+        '<tool_call>{"name": "read", "arguments": {broken',
+    ]
+    frames = list(
+        iter_live_sse(
+            completion_id="chatcmpl-suppress",
+            created=8,
+            model="default",
+            deltas=iter(deltas),
+            watch_tools=True,
+            allowed_tool_names={"read"},
+        )
+    )
+    payloads = _parse_sse(frames)
+    content = "".join(_content_pieces(payloads))
+
+    assert content == "Here we go.\n"
+    assert "<tool_call>" not in content
+    assert "broken" not in content
+    assert payloads[-2]["choices"][0]["finish_reason"] == "stop"
+    assert not any(
+        isinstance(p, dict) and "tool_calls" in p["choices"][0]["delta"] for p in payloads
+    )
+
+
+def test_live_sse_unknown_tool_demoted_to_content():
+    deltas = [
+        "Trying.\n",
+        "<tool_call>\n",
+        '{"name": "rogue", "arguments": {"x": 1}}\n',
+        "</tool_call>",
+    ]
+    frames = list(
+        iter_live_sse(
+            completion_id="chatcmpl-unknown",
+            created=9,
+            model="default",
+            deltas=iter(deltas),
+            watch_tools=True,
+            allowed_tool_names={"read"},
+        )
+    )
+    payloads = _parse_sse(frames)
+    content = "".join(_content_pieces(payloads))
+
+    assert "Trying." in content
+    assert "rogue" in content
+    assert payloads[-2]["choices"][0]["finish_reason"] == "stop"
+    assert not any(
+        isinstance(p, dict) and "tool_calls" in p["choices"][0]["delta"] for p in payloads
+    )
+
+
+def test_live_sse_parses_case_variant_tags():
+    deltas = [
+        "<TOOL_CALL>\n",
+        '{"name": "read", "arguments": {"path": "a.py"}}\n',
+        "</Tool_Call>",
+    ]
+    frames = list(
+        iter_live_sse(
+            completion_id="chatcmpl-case",
+            created=10,
+            model="default",
+            deltas=iter(deltas),
+            watch_tools=True,
+            allowed_tool_names={"read"},
+        )
+    )
+    payloads = _parse_sse(frames)
+
+    assert payloads[-2]["choices"][0]["finish_reason"] == "tool_calls"
+    assert "".join(_content_pieces(payloads)) == ""
+    tool_delta = next(
+        p["choices"][0]["delta"]["tool_calls"][0]
+        for p in payloads
+        if isinstance(p, dict) and "tool_calls" in p["choices"][0]["delta"]
+    )
+    assert tool_delta["function"]["name"] == "read"

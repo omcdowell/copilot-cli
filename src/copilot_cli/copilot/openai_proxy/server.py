@@ -21,6 +21,19 @@ from copilot_cli.copilot.openai_proxy.tool_parser import parse_tool_calls, to_op
 DEFAULT_MODEL_ID = "m365-copilot"
 
 
+def _allowed_tool_names(tools: list[dict[str, Any]] | None) -> set[str] | None:
+    if not tools:
+        return None
+    names: set[str] = set()
+    for tool in tools:
+        if tool.get("type") != "function":
+            continue
+        name = tool.get("function", {}).get("name")
+        if name:
+            names.add(str(name))
+    return names or None
+
+
 def create_app(chat_arguments: ChatArguments) -> Flask:
     app = Flask(__name__)
     session_store = SessionStore(chat_arguments)
@@ -56,6 +69,7 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
 
         model = payload.get("model", DEFAULT_MODEL_ID)
         tools = payload.get("tools")
+        allowed_tool_names = _allowed_tool_names(tools)
         session_key = SessionStore.session_key_from_request(request, messages)
         is_new_conversation = session_store.is_new_conversation(request, messages, session_key)
 
@@ -95,6 +109,7 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
                         model=model,
                         deltas=deltas(),
                         watch_tools=bool(tools),
+                        allowed_tool_names=allowed_tool_names,
                     )
 
             return Response(
@@ -114,7 +129,10 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
                 automator = session_store.reset_session(session_key)
                 response_text = automator.send_prompt_text(prompt)
 
-        content, parsed_tool_calls = parse_tool_calls(response_text)
+        content, parsed_tool_calls = parse_tool_calls(
+            response_text,
+            allowed_tool_names=allowed_tool_names,
+        )
 
         if parsed_tool_calls:
             message: dict[str, Any] = {

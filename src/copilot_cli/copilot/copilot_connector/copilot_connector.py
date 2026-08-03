@@ -31,7 +31,7 @@ from copilot_cli.copilot.loggers.file_logger import FileLogger
 from copilot_cli.copilot.models.agent_info_model import AgentInfoModel
 from copilot_cli.copilot.models.chat_argument import ChatArguments
 from copilot_cli.copilot.models.conversation_parameters import ConversationParameters
-from copilot_cli.copilot.websocket_message.substrate_deltas import fallback_bot_text, write_at_cursor_delta
+from copilot_cli.copilot.websocket_message.substrate_deltas import CumulativeTextReconstructor, fallback_bot_text
 from copilot_cli.copilot.websocket_message.websocket_message import WebsocketMessage
 
 TOOL_PROMPT = "[Tool]: "
@@ -164,7 +164,10 @@ class CopilotConnector:
 
         url = self.__conversation_params.url
         prompt_message = self.__get_prompt(prompt)
+        request_id = self._turn_request_id
         self.__index += 1
+
+        reconstructor = CumulativeTextReconstructor()
 
         async with websockets.connect(url) as websocket:
             handshake = WebsocketMessage.to_websocket_message({"protocol": "json", "version": 1})
@@ -192,13 +195,10 @@ class CopilotConnector:
                     if msg_type == 6:
                         continue
 
-                    delta = write_at_cursor_delta(msg)
-                    if delta:
-                        # Never flush fallback_text once deltas flow: update frames
-                        # echo conversation history, so on turn 2+ it holds the
-                        # PREVIOUS bot answer and flushing it duplicates output.
+                    chunk = reconstructor.feed(msg, request_id)
+                    if chunk:
                         outcome.deltas_yielded = True
-                        yield delta
+                        yield chunk
 
                     maybe_fallback = fallback_bot_text(msg)
                     if maybe_fallback:
@@ -261,6 +261,7 @@ class CopilotConnector:
         # id across turns collides with the previous message and the reply comes
         # back with the prior answer prepended — fresh ids per message.
         request_id = uuid.uuid4().hex
+        self._turn_request_id = request_id
         used_agent_params = {}
         if len(self.__conversation_params.used_agent) > 0:
             used_agent = self.__conversation_params.used_agent[0]

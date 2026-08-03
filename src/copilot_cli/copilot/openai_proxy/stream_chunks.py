@@ -11,12 +11,18 @@ import json
 from collections.abc import Iterator
 from typing import Any
 
-from copilot_cli.copilot.openai_proxy.tool_parser import ParsedToolCall, parse_tool_calls
+from copilot_cli.copilot.openai_proxy.tool_parser import (
+    TOOL_HOLDBACK_CHARS,
+    TOOL_OPEN_TAG,
+    ParsedToolCall,
+    find_tool_open_tag,
+    has_tool_call_markup,
+    parse_tool_calls,
+    remaining_content_after_streamed,
+)
 
 # Holdback lives in the proxy (not pi) so OpenAI clients never see a partial
 # Hermes <tool_call> — one place, protocol-faithful.
-TOOL_OPEN_TAG = "<tool_call>"
-TOOL_HOLDBACK_CHARS = len(TOOL_OPEN_TAG)
 
 
 def _sse(payload: dict[str, Any] | str) -> str:
@@ -117,6 +123,7 @@ def iter_live_sse(
     deltas: Iterator[str],
     watch_tools: bool,
     holdback_chars: int = TOOL_HOLDBACK_CHARS,
+    allowed_tool_names: set[str] | None = None,
 ) -> Iterator[str]:
     """
     Stream Substrate deltas as OpenAI SSE with optional Hermes tool detection.
@@ -134,6 +141,7 @@ def iter_live_sse(
     full = ""
     emitted = 0
     tool_mode = False
+    open_at = -1
 
     for delta in deltas:
         if not delta:
@@ -148,7 +156,7 @@ def iter_live_sse(
         if tool_mode:
             continue
 
-        open_at = full.find(TOOL_OPEN_TAG)
+        open_at = find_tool_open_tag(full)
         if open_at != -1:
             # Flush any prose before the tag that has not been sent yet.
             if open_at > emitted:
@@ -163,17 +171,47 @@ def iter_live_sse(
             yield _content_frame(completion_id, created, model, full[emitted:flush_upto])
             emitted = flush_upto
 
-    if watch_tools and tool_mode:
-        _content, tool_calls = parse_tool_calls(full)
-        # Content before the tag was already streamed; only emit tool_calls here.
+    if watch_tools and (tool_mode or has_tool_call_markup(full)):
+        content, tool_calls = parse_tool_calls(
+            full,
+            allowed_tool_names=allowed_tool_names,
+            salvage_unclosed=True,
+        )
         if tool_calls:
+            # Match non-streaming parse_tool_calls: strip tags, keep surrounding prose.
+            # Emit any parsed prose not yet streamed (including text after </tool_call>)
+            # before tool_call frames.
+            streamed_prefix = full[:open_at] if tool_mode and open_at != -1 else full[:emitted]
+            leftover = remaining_content_after_streamed(content, streamed_prefix)
+            if leftover:
+                yield _content_frame(completion_id, created, model, leftover)
             yield from _tool_call_frames(completion_id, created, model, tool_calls)
             yield from _finish_frames(completion_id, created, model, "tool_calls")
             return
-        # Tag-like text that did not parse — flush the remainder as content.
-        remainder = full[emitted:]
-        if remainder:
-            yield _content_frame(completion_id, created, model, remainder)
+
+        # Valid tool blocks filtered out (e.g. unknown name) — emit as content.
+        if allowed_tool_names is not None:
+            _, unfiltered_calls = parse_tool_calls(
+                full,
+                allowed_tool_names=None,
+                salvage_unclosed=True,
+            )
+            if unfiltered_calls:
+                remainder = full[emitted:]
+                if remainder:
+                    yield _content_frame(completion_id, created, model, remainder)
+                yield from _finish_frames(completion_id, created, model, "stop")
+                return
+
+        # Salvage failed — flush safe prose, suppress tag-like tail.
+        if tool_mode and open_at != -1 and open_at > emitted:
+            yield _content_frame(completion_id, created, model, full[emitted:open_at])
+            emitted = open_at
+        elif not tool_mode and emitted < len(full):
+            open_at = find_tool_open_tag(full)
+            if open_at != -1 and open_at > emitted:
+                yield _content_frame(completion_id, created, model, full[emitted:open_at])
+                emitted = open_at
         yield from _finish_frames(completion_id, created, model, "stop")
         return
 
