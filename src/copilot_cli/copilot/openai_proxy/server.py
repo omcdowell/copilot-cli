@@ -15,7 +15,7 @@ from copilot_cli.copilot.openai_proxy.message_flattener import (
     flatten_messages,
 )
 from copilot_cli.copilot.openai_proxy.session_store import SessionStore
-from copilot_cli.copilot.openai_proxy.stream_chunks import iter_live_sse
+from copilot_cli.copilot.openai_proxy.stream_chunks import iter_live_sse_with_keepalive
 from copilot_cli.copilot.openai_proxy.tool_parser import parse_tool_calls, to_openai_tool_calls
 
 DEFAULT_MODEL_ID = "m365-copilot"
@@ -86,6 +86,15 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
         created = int(time.time())
         want_stream = bool(payload.get("stream"))
 
+        def run_copilot_turn() -> str:
+            with session_store.lock_session(session_key):
+                automator = session_store.get_automator(session_key, is_new_conversation)
+                text = automator.send_prompt_text(prompt)
+                if not text and tools:
+                    automator = session_store.reset_session(session_key)
+                    text = automator.send_prompt_text(prompt)
+                return text
+
         if want_stream:
 
             def live_events() -> Iterator[str]:
@@ -98,16 +107,15 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
                             if chunk:
                                 saw_text = True
                             yield chunk
-                        # Empty tool replies are usually a stuck Substrate session.
                         if not saw_text and tools:
                             automator_retry = session_store.reset_session(session_key)
                             yield from automator_retry.iter_prompt_text(prompt)
 
-                    yield from iter_live_sse(
+                    yield from iter_live_sse_with_keepalive(
                         completion_id=completion_id,
                         created=created,
                         model=model,
-                        deltas=deltas(),
+                        deltas=deltas,
                         watch_tools=bool(tools),
                         allowed_tool_names=allowed_tool_names,
                     )
@@ -122,12 +130,18 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
                 },
             )
 
-        with session_store.lock_session(session_key):
-            automator = session_store.get_automator(session_key, is_new_conversation)
-            response_text = automator.send_prompt_text(prompt)
-            if not response_text and tools:
-                automator = session_store.reset_session(session_key)
-                response_text = automator.send_prompt_text(prompt)
+        try:
+            response_text = run_copilot_turn()
+        except Exception as exc:  # noqa: BLE001 — surface upstream failures as JSON
+            return jsonify(
+                {
+                    "error": {
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "type": "copilot_proxy_error",
+                        "code": "upstream_error",
+                    }
+                }
+            ), 502
 
         content, parsed_tool_calls = parse_tool_calls(
             response_text,
