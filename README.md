@@ -31,7 +31,7 @@ With [uv](https://docs.astral.sh/uv/): `uv venv && source .venv/bin/activate && 
 1. **Cached token** — `--cached-token` reads `substrate_access_token` from `./tokens.json`
 2. **Interactive** — Puppeteer opens a visible Edge window with a persistent profile (default `~/.config/copilot-cli/msedge-profile`). Sign in once (MFA/SSO OK); later runs reuse cookies. No passwords on the CLI.
 
-The bearer is captured from the Substrate WebSocket (`access_token=` in the `wss://substrate.office.com/m365Copilot/Chathub/...` URL), not from merely being signed in on a landing page.
+For `officeweb`, the bearer is captured live from the Substrate WebSocket handshake (`access_token=` in the `wss://substrate.office.com/m365Copilot/Chathub/...` URL), with an OAuth-response / MSAL fallback. For `teamshub`, it is read from the MSAL token cache in the signed-in page's `localStorage`.
 
 | Scenario | Surface |
 |----------|---------|
@@ -65,4 +65,4 @@ pi -e ./pi-extension
 
 In Pi: `/model m365-copilot/default`
 
-The proxy exposes `GET /v1/models` and `POST /v1/chat/completions` on `http://127.0.0.1:8787/v1`. Pi keeps local tools; Copilot is the reasoning backend. Tool calling is emulated via Hermes-style `<tool_call>` XML; streaming is synthesized from complete Copilot replies.
+The proxy exposes `GET /v1/models` and `POST /v1/chat/completions` on `http://127.0.0.1:8787/v1` (override the bind address with `--host`). Pi keeps local tools; Copilot is the reasoning backend. Tool calling is emulated via Hermes-style `<tool_call>` XML; responses stream live, token by token, from Substrate `writeAtCursor` deltas (falling back to a complete reply only when the hub does not stream).
