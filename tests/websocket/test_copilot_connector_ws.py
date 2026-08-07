@@ -211,3 +211,30 @@ async def test_each_turn_sends_a_fresh_request_id(
     # Turn ordering flags must still advance.
     assert first_args["isStartOfSession"] is True
     assert second_args["isStartOfSession"] is False
+
+
+def test_bing_web_search_enabled_by_default(
+    chat_args: ChatArguments,
+    token_cache: TokenCache,
+) -> None:
+    agents_response = MagicMock()
+    agents_response.status_code = 200
+    agents_response.json.return_value = {"gptList": []}
+    connector = CopilotConnector(
+        chat_args,
+        token_cache=token_cache,
+        http_get=lambda *args, **kwargs: agents_response,
+    )
+    connector.init_connection()
+
+    assert connector.conversation_parameters.used_plugins == [
+        {"Id": "BingWebSearch", "Source": "BuiltIn"}
+    ]
+
+    connector.disable_bing_web_search()
+    assert connector.conversation_parameters.used_plugins == []
+
+    connector.enable_bing_web_search()
+    assert connector.conversation_parameters.used_plugins == [
+        {"Id": "BingWebSearch", "Source": "BuiltIn"}
+    ]

@@ -35,6 +35,7 @@ from copilot_cli.copilot.websocket_message.substrate_deltas import CumulativeTex
 from copilot_cli.copilot.websocket_message.websocket_message import WebsocketMessage
 
 TOOL_PROMPT = "[Tool]: "
+BING_WEB_SEARCH_PLUGIN = {"Id": "BingWebSearch", "Source": "BuiltIn"}
 
 
 @dataclass
@@ -228,12 +229,13 @@ class CopilotConnector:
     def enable_bing_web_search(self) -> None:
         if not self.__is_initialized:
             raise CopilotConnectionNotInitializedException("Copilot connection not initialized.")
-        self.__conversation_params.used_plugins.append({"Id": "BingWebSearch", "Source": "BuiltIn"})
+        self.__conversation_params.used_plugins.append(BING_WEB_SEARCH_PLUGIN)
 
     def disable_bing_web_search(self) -> None:
         if not self.__is_initialized:
             raise CopilotConnectionNotInitializedException("Copilot connection not initialized.")
-        self.__conversation_params.used_plugins = []
+        # ConversationParameters is a NamedTuple: mutate the list in place.
+        self.__conversation_params.used_plugins.clear()
 
     def use_agent(self, agent_index: int) -> str:
         if not self.__is_initialized:
@@ -550,7 +552,12 @@ class CopilotConnector:
         available_agents: list[AgentInfoModel] = self.__get_available_agents(access_token)
 
         return ConversationParameters(
-            conversation_id=str(uuid.uuid4()), url=url, session_id=session_id, used_plugins=[], available_gpts=available_agents, used_agent=[]
+            conversation_id=str(uuid.uuid4()),
+            url=url,
+            session_id=session_id,
+            used_plugins=[BING_WEB_SEARCH_PLUGIN],
+            available_gpts=available_agents,
+            used_agent=[],
         )
 
     def __log(self, message: WebsocketMessage) -> None:
