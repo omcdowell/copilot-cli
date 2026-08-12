@@ -28,6 +28,7 @@ from copilot_cli.copilot.exceptions.copilot_connection_not_initialized_exception
     CopilotConnectionNotInitializedException,
 )
 from copilot_cli.copilot.loggers.file_logger import FileLogger
+from copilot_cli.copilot.loggers.stream_trace import StreamTrace
 from copilot_cli.copilot.models.agent_info_model import AgentInfoModel
 from copilot_cli.copilot.models.chat_argument import ChatArguments
 from copilot_cli.copilot.models.conversation_parameters import ConversationParameters
@@ -169,6 +170,8 @@ class CopilotConnector:
         self.__index += 1
 
         reconstructor = CumulativeTextReconstructor()
+        trace = StreamTrace()
+        trace.event("turn_start", requestId=request_id, index=self.__index - 1, prompt=prompt)
 
         async with websockets.connect(url) as websocket:
             handshake = WebsocketMessage.to_websocket_message({"protocol": "json", "version": 1})
@@ -190,14 +193,18 @@ class CopilotConnector:
                     try:
                         msg = json.loads(part)
                     except json.JSONDecodeError:
+                        trace.event("unparsable_frame", raw=part[:2000])
                         continue
 
                     msg_type = msg.get("type", -1)
                     if msg_type == 6:
                         continue
 
+                    trace.event("frame", raw=part)
+
                     chunk = reconstructor.feed(msg, request_id)
                     if chunk:
+                        trace.event("released", text=chunk)
                         outcome.deltas_yielded = True
                         yield chunk
 
@@ -219,20 +226,26 @@ class CopilotConnector:
                     if msg_type == 3:
                         tail = reconstructor.flush()
                         if tail:
+                            trace.event("flushed", text=tail)
                             outcome.deltas_yielded = True
                             yield tail
                         if not outcome.deltas_yielded and fallback_text:
+                            trace.event("fallback", text=fallback_text)
                             outcome.deltas_yielded = True
                             yield fallback_text
+                        trace.event("turn_end", reason="type3", final_text=fallback_text)
                         return
 
             tail = reconstructor.flush()
             if tail:
+                trace.event("flushed", text=tail)
                 outcome.deltas_yielded = True
                 yield tail
             if not outcome.deltas_yielded and fallback_text:
+                trace.event("fallback", text=fallback_text)
                 outcome.deltas_yielded = True
                 yield fallback_text
+            trace.event("turn_end", reason="socket_closed", final_text=fallback_text)
 
     def enable_bing_web_search(self) -> None:
         if not self.__is_initialized:
