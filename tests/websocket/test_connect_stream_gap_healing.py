@@ -60,9 +60,11 @@ def _final(text: str, request_id: str) -> dict:
 class RequestIdAwareWebSocket:
     """Fake hub that echoes the turn's requestId back on its snapshot frames."""
 
-    def __init__(self) -> None:
+    def __init__(self, snapshot_request_id: str | None = None) -> None:
         self.sent: list[str] = []
         self._frames: list[str] | None = None
+        # None => snapshots carry the turn's requestId; a string => they don't.
+        self._snapshot_request_id = snapshot_request_id
 
     async def send(self, payload: str) -> None:
         self.sent.append(payload)
@@ -75,7 +77,7 @@ class RequestIdAwareWebSocket:
         return chat["arguments"][0]["message"]["requestId"]
 
     def _build(self) -> list[str]:
-        rid = self._request_id()
+        rid = self._snapshot_request_id or self._request_id()
         return [
             _frame(_delta("Oliver")),  # "Hello " never arrives as a delta
             _frame(_snapshot("Hello Oliver! \U0001f44b", rid)),
@@ -154,3 +156,22 @@ async def test_stream_matches_web_answer_when_deltas_skip_segments(connector, mo
     chunks = [chunk async for chunk in connector.connect_stream("hi")]
 
     assert "".join(chunks) == FULL_TEXT
+
+
+@pytest.mark.asyncio
+async def test_no_gapped_text_is_streamed_when_snapshots_are_not_turn_scoped(
+    connector, monkeypatch
+) -> None:
+    """If every snapshot is filtered out, the delta stream alone is untrustworthy.
+
+    Nothing may be released until the final frame supplies the real answer.
+    """
+    fake_ws = RequestIdAwareWebSocket(snapshot_request_id="some-other-request-id")
+    monkeypatch.setattr(
+        "copilot_cli.copilot.copilot_connector.copilot_connector.websockets.connect",
+        lambda _url: fake_ws,
+    )
+
+    chunks = [chunk async for chunk in connector.connect_stream("hi")]
+
+    assert chunks == [FULL_TEXT]

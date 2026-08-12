@@ -65,4 +65,23 @@ pi -e ./pi-extension
 
 In Pi: `/model m365-copilot/default`
 
-The proxy exposes `GET /v1/models` and `POST /v1/chat/completions` on `http://127.0.0.1:8787/v1` (override the bind address with `--host`). Pi keeps local tools; Copilot is the reasoning backend. Tool calling is emulated via Hermes-style `<tool_call>` XML; responses stream live, token by token, from Substrate `writeAtCursor` deltas (falling back to a complete reply only when the hub does not stream).
+The proxy exposes `GET /v1/models` and `POST /v1/chat/completions` on `http://127.0.0.1:8787/v1` (override the bind address with `--host`). Pi keeps local tools; Copilot is the reasoning backend. Tool calling is emulated via Hermes-style `<tool_call>` XML.
+
+### Streaming fidelity
+
+Substrate does not deliver every character through `writeAtCursor`: some segments only appear in the cumulative `messages[].text` snapshot of a later frame. Streamed text cannot be retracted, so the proxy releases only what a snapshot has confirmed, and the turn's final answer heals anything still outstanding. A hub that streams snapshots gives smooth token-by-token output; a hub that does not gives the complete answer in one chunk at the end of the turn. The text Pi renders always matches the Copilot web UI.
+
+### Diagnosing a truncated or garbled answer
+
+`serve` prints the version, module path, and git revision it is running — check that first when a fix appears to have no effect (a `pip install .` box keeps serving `site-packages` after a `git pull`; use `pip install -e .` or reinstall).
+
+Capture the raw hub frames and replay them offline:
+
+```bash
+COPILOT_CLI_WS_TRACE=/tmp/copilot-trace.jsonl \
+  copilot-cli serve -u user@contoso.com --cached-token -s officeweb --port 8787
+# reproduce the bad turn, then:
+python tools/replay_ws_trace.py /tmp/copilot-trace.jsonl
+```
+
+The replay reports whether the hub sent mid-stream snapshots, whether they were dropped by the requestId/messageType filters, and exactly which text is missing from the streamed answer. Traces contain prompt and answer text (access tokens are redacted).

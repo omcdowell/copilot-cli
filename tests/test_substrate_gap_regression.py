@@ -118,6 +118,44 @@ def test_stream_realigns_after_an_unrecoverable_gap() -> None:
     assert streamed.count(" to help.") == 1
 
 
+def test_gapped_deltas_are_replaced_by_the_final_text_when_no_snapshot_streams() -> None:
+    """Some hubs only send messages[] on the final frame, or tag it with another id.
+
+    Nothing is confirmed mid-turn, so no gapped delta text may reach the client:
+    the authoritative final answer is what gets streamed, in one piece.
+    """
+    frames = [
+        _delta("Oliver"),
+        _delta(" to help with work tasks, coding, documents,"),
+        _delta(" Microsoft 365 questions, research, writing, and more.\n\n"),
+        _delta(" you like to do today?"),
+        {"type": 3},
+    ]
+    reconstructor = CumulativeTextReconstructor()
+    streamed = [reconstructor.feed(frame, RID) for frame in frames]
+    streamed.append(reconstructor.finalize(FULL_TEXT))  # type-2 text the connector kept
+
+    assert [chunk for chunk in streamed if chunk] == [FULL_TEXT]
+
+
+def test_finalize_never_replays_a_longer_answer_from_a_previous_turn() -> None:
+    """fallback_bot_text is not requestId-scoped; an echo must not be adopted."""
+    reconstructor = CumulativeTextReconstructor()
+    assert reconstructor.feed(_delta("New answer."), RID) is None
+
+    echoed_previous_answer = "A much longer answer from the previous turn, unrelated to this one."
+
+    assert reconstructor.finalize(echoed_previous_answer) == "New answer."
+
+
+def test_finalize_appends_only_the_missing_tail_when_text_was_already_streamed() -> None:
+    reconstructor = CumulativeTextReconstructor(heal_window_frames=0)
+    assert reconstructor.feed(_delta("Hello Oliver!"), RID) == "Hello Oliver!"
+
+    assert reconstructor.finalize("Hello Oliver! How can I help?") == " How can I help?"
+    assert reconstructor.finalize("Hello Oliver! How can I help?") is None
+
+
 def test_interstitial_bot_messages_are_not_used_as_snapshots() -> None:
     """Loader/search interstitials share the requestId but are not the answer."""
     interstitial = {

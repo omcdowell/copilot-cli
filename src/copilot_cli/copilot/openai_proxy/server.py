@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import subprocess  # nosec
 import time
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 from flask import Flask, Response, jsonify, request
@@ -16,9 +19,48 @@ from copilot_cli.copilot.openai_proxy.message_flattener import (
 )
 from copilot_cli.copilot.openai_proxy.session_store import SessionStore
 from copilot_cli.copilot.openai_proxy.stream_chunks import iter_live_sse_with_keepalive
+from copilot_cli.copilot.loggers.stream_trace import TRACE_ENV_VAR, StreamTrace
 from copilot_cli.copilot.openai_proxy.tool_parser import parse_tool_calls, to_openai_tool_calls
 
 DEFAULT_MODEL_ID = "m365-copilot"
+
+
+def build_identity() -> str:
+    """Describe the code actually running, so a stale install is obvious.
+
+    A `pip install .` (non-editable) box keeps serving site-packages after a
+    `git pull`; printing the module path plus its revision makes that visible
+    without shelling into the process.
+    """
+    import copilot_cli
+
+    package_dir = Path(copilot_cli.__file__).resolve().parent
+    try:
+        from importlib.metadata import version
+
+        package_version = version("copilot-cli")
+    except Exception:  # noqa: BLE001 — identity output must never fail a start-up
+        package_version = "unknown"
+
+    revision = "no git checkout"
+    try:
+        completed = subprocess.run(  # nosec
+            ["git", "-C", str(package_dir), "describe", "--always", "--dirty", "--tags"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            revision = completed.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    trace = os.environ.get(TRACE_ENV_VAR)
+    return (
+        f"copilot-cli {package_version} ({revision})\n"
+        f"  module: {package_dir}\n"
+        f"  frame trace: {trace if trace else f'off (set {TRACE_ENV_VAR}=/path/trace.jsonl)'}"
+    )
 
 
 def _allowed_tool_names(tools: list[dict[str, Any]] | None) -> set[str] | None:
@@ -188,5 +230,8 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
 
 def run_server(chat_arguments: ChatArguments, host: str, port: int) -> None:
     app = create_app(chat_arguments)
+    print(build_identity())
     print(f"M365 Copilot OpenAI proxy listening on http://{host}:{port}/v1")
+    if StreamTrace().enabled:
+        print("Tracing raw Substrate frames (contains prompt and answer text).")
     app.run(host=host, port=port, threaded=True)

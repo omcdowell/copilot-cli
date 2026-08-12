@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 
 def write_at_cursor_deltas(message: dict[str, Any]) -> list[str]:
@@ -108,12 +108,14 @@ def fallback_bot_text(message: dict[str, Any]) -> str | None:
     return None
 
 
-# How many consecutive snapshot-free frames may be released before we stop
-# waiting for a healing snapshot. Substrate does not deliver every character
-# through writeAtCursor: some segments only ever show up in messages[].text.
+# Substrate does not deliver every character through writeAtCursor: some
+# segments only ever show up in the cumulative messages[].text snapshot.
 # Releasing a delta immediately makes any segment it skipped unrecoverable,
-# so delta-only frames are held for a short window first.
-HEAL_WINDOW_FRAMES = 4
+# because streamed text cannot be retracted. ``None`` therefore means "only
+# release what a snapshot has confirmed" (correctness first: a hub that never
+# streams snapshots yields one chunk at end of turn). An int caps how many
+# unconfirmed frames may pile up before the delta text is released anyway.
+WAIT_FOR_SNAPSHOT = None
 
 # Tail sizes tried when re-anchoring an already-released prefix inside a
 # snapshot. Bounded so a diverged turn stays O(1) per frame.
@@ -146,63 +148,96 @@ class CumulativeTextReconstructor:
     """
     Reconstruct streaming bot text from writeAtCursor deltas and messages[] snapshots.
 
-    Keeps an assembled string per turn: concatenated deltas, healed by the
-    request-scoped cumulative snapshot whenever one arrives. Only new suffixes
-    are released; frames that would rewind are ignored.
+    Keeps an assembled string per turn: concatenated deltas, healed (replaced)
+    by the request-scoped cumulative snapshot whenever one arrives. Only new
+    suffixes are released; frames that would rewind are ignored.
 
-    Deltas alone are not trusted to be complete, so a run of snapshot-free
-    frames is held back for up to ``heal_window_frames`` frames. Text released
-    to the client cannot be retracted, and a snapshot can only fill a gap that
-    is still ahead of the release point. Pass ``heal_window_frames=0`` to
-    release every delta immediately (no gap healing).
+    Deltas are not trusted to be complete. By default only snapshot-confirmed
+    text is released, so a delta that skipped a segment is corrected by the
+    next snapshot before the client ever sees it; unconfirmed text goes out at
+    end of turn via :meth:`finalize`. ``heal_window_frames`` trades that
+    guarantee for latency: ``0`` releases every delta immediately (segments
+    the hub only sends via snapshot are then lost), ``n`` releases after n
+    unconfirmed frames.
     """
 
-    def __init__(self, heal_window_frames: int = HEAL_WINDOW_FRAMES) -> None:
+    def __init__(self, heal_window_frames: Optional[int] = WAIT_FOR_SNAPSHOT) -> None:
         self._assembled = ""
         self._released_len = 0
+        self._confirmed_len = 0
         self._heal_window_frames = heal_window_frames
-        self._frames_held = 0
+        self._unconfirmed_frames = 0
 
     def feed(self, message: dict[str, Any], request_id: str | None = None) -> str | None:
         for delta in write_at_cursor_deltas(message):
             self._assembled += delta
 
         snapshot = snapshot_bot_text(message, request_id)
-        confirmed = self._apply_snapshot(snapshot) if snapshot else False
+        if snapshot and self._apply_snapshot(snapshot):
+            self._unconfirmed_frames = 0
+        elif len(self._assembled) > self._confirmed_len:
+            self._unconfirmed_frames += 1
 
-        if len(self._assembled) <= self._released_len:
-            return None
+        return self._release(self._release_upto())
 
-        if not confirmed:
-            self._frames_held += 1
-            if self._frames_held < self._heal_window_frames:
-                return None
+    def finalize(self, final_text: str | None = None) -> str | None:
+        """
+        Release everything left, healed by the turn's final text when possible.
 
-        return self._release()
+        ``final_text`` is the authoritative answer from the type-2 frame. It is
+        adopted only when it demonstrably contains this turn's text, so an
+        echoed answer from a previous turn can never be replayed.
+        """
+        if final_text and self._is_this_turn(final_text):
+            offset = released_offset_in(final_text, self._assembled[: self._released_len])
+            if offset is not None and offset >= self._released_len:
+                self._assembled = final_text
+                self._released_len = offset
+                self._confirmed_len = len(final_text)
+        return self._release(len(self._assembled))
 
     def flush(self) -> str | None:
-        """Release anything still held back (end of turn)."""
-        if len(self._assembled) <= self._released_len:
-            return None
-        return self._release()
+        """Release anything still held back (end of turn, no final text available)."""
+        return self._release(len(self._assembled))
+
+    def _is_this_turn(self, text: str) -> bool:
+        """True when ``text`` covers what this turn produced (or we produced nothing)."""
+        anchor = self._assembled[: self._released_len] or self._assembled
+        if not anchor:
+            return True
+        return released_offset_in(text, anchor) is not None
 
     def _apply_snapshot(self, snapshot: str) -> bool:
         """Heal assembled text from a cumulative snapshot; True when it lines up."""
-        released = self._assembled[: self._released_len]
         if len(snapshot) <= len(self._assembled):
-            # Snapshot lags the delta stream; it only confirms alignment.
-            return self._assembled.startswith(snapshot)
+            # Snapshot lags the delta stream; it can only confirm alignment.
+            if not self._assembled.startswith(snapshot):
+                return False
+            self._confirmed_len = max(self._confirmed_len, len(snapshot))
+            return True
 
-        offset = released_offset_in(snapshot, released)
+        offset = released_offset_in(snapshot, self._assembled[: self._released_len])
         if offset is None or offset < self._released_len:
             return False
 
+        # Drop unreleased delta text: the snapshot is authoritative, and the
+        # deltas may have skipped a segment it carries.
         self._assembled = snapshot
         self._released_len = offset
+        self._confirmed_len = len(snapshot)
         return True
 
-    def _release(self) -> str | None:
-        chunk = self._assembled[self._released_len :]
-        self._released_len = len(self._assembled)
-        self._frames_held = 0
+    def _release_upto(self) -> int:
+        window = self._heal_window_frames
+        if window is not None and self._unconfirmed_frames >= window:
+            return len(self._assembled)
+        return min(self._confirmed_len, len(self._assembled))
+
+    def _release(self, upto: int) -> str | None:
+        if upto <= self._released_len:
+            return None
+        chunk = self._assembled[self._released_len : upto]
+        self._released_len = upto
+        if upto >= len(self._assembled):
+            self._unconfirmed_frames = 0
         return chunk or None

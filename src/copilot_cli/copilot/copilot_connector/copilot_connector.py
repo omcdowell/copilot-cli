@@ -224,9 +224,9 @@ class CopilotConnector:
                             fallback_text = parsed.copilot_message
 
                     if msg_type == 3:
-                        tail = reconstructor.flush()
+                        tail = reconstructor.finalize(fallback_text)
                         if tail:
-                            trace.event("flushed", text=tail)
+                            trace.event("finalized", text=tail)
                             outcome.deltas_yielded = True
                             yield tail
                         if not outcome.deltas_yielded and fallback_text:
@@ -236,9 +236,9 @@ class CopilotConnector:
                         trace.event("turn_end", reason="type3", final_text=fallback_text)
                         return
 
-            tail = reconstructor.flush()
+            tail = reconstructor.finalize(fallback_text)
             if tail:
-                trace.event("flushed", text=tail)
+                trace.event("finalized", text=tail)
                 outcome.deltas_yielded = True
                 yield tail
             if not outcome.deltas_yielded and fallback_text:
