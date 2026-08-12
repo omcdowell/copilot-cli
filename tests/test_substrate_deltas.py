@@ -93,7 +93,8 @@ def test_cursor_jump_snapshot_supplies_missing_sentence_start():
 
 def test_snapshot_heal_then_later_delta_continues():
     rid = "heal-then-delta"
-    reconstructor = CumulativeTextReconstructor()
+    # heal_window_frames=0: assert healing itself, without the delta hold-back.
+    reconstructor = CumulativeTextReconstructor(heal_window_frames=0)
     heal = {
         "type": 1,
         "target": "update",
@@ -116,7 +117,7 @@ def test_snapshot_heal_then_later_delta_continues():
 
 
 def test_divergent_snapshot_is_rejected():
-    reconstructor = CumulativeTextReconstructor()
+    reconstructor = CumulativeTextReconstructor(heal_window_frames=0)
     first = {
         "type": 1,
         "target": "update",
@@ -138,7 +139,7 @@ def test_divergent_snapshot_is_rejected():
 
 
 def test_reconstructor_ignores_rewind_frames():
-    reconstructor = CumulativeTextReconstructor()
+    reconstructor = CumulativeTextReconstructor(heal_window_frames=0)
     first = {
         "type": 1,
         "target": "update",
@@ -151,6 +152,19 @@ def test_reconstructor_ignores_rewind_frames():
     }
     assert reconstructor.feed(first) == "Hello world."
     assert reconstructor.feed(second) is None
+
+
+def test_delta_only_frames_are_held_then_released_within_the_heal_window():
+    """Deltas may skip text that only a snapshot carries, so they wait briefly."""
+    reconstructor = CumulativeTextReconstructor(heal_window_frames=3)
+    delta = {"type": 1, "target": "update", "arguments": [{"writeAtCursor": "ab"}]}
+
+    assert reconstructor.feed(delta) is None
+    assert reconstructor.feed(delta) is None
+    assert reconstructor.feed(delta) == "ababab"
+    assert reconstructor.feed(delta) is None
+    assert reconstructor.flush() == "ab"
+    assert reconstructor.flush() is None
 
 
 def test_fallback_bot_text_from_type2():

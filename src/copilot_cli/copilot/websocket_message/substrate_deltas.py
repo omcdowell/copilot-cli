@@ -29,12 +29,28 @@ def write_at_cursor_delta(message: dict[str, Any]) -> str | None:
     return deltas[0] if deltas else None
 
 
+# Interstitials ("Searching your work content…", search queries, cards) are bot
+# messages on the same requestId, but they are not the answer being written.
+_ANSWER_MESSAGE_TYPES = (None, "Chat")
+
+
+def _is_answer_entry(entry: dict[str, Any], request_id: str | None) -> bool:
+    if entry.get("author") == "user":
+        return False
+    if entry.get("messageType") not in _ANSWER_MESSAGE_TYPES:
+        return False
+    if request_id is not None and entry.get("requestId") != request_id:
+        return False
+    return True
+
+
 def snapshot_bot_text(message: dict[str, Any], request_id: str | None = None) -> str | None:
     """
     Best-effort bot text snapshot from messages[] on type-1 update or type-2 item.
 
     When ``request_id`` is set, only bot messages with that requestId are considered
-    (skips echoed history from prior turns).
+    (skips echoed history from prior turns). Non-``Chat`` messages (loader/search
+    interstitials) are never treated as the answer text.
     """
     msg_type = message.get("type")
     if msg_type == 1 and message.get("target") == "update":
@@ -55,9 +71,7 @@ def snapshot_bot_text(message: dict[str, Any], request_id: str | None = None) ->
         for entry in reversed(entries):
             if not isinstance(entry, dict):
                 continue
-            if entry.get("author") == "user":
-                continue
-            if request_id is not None and entry.get("requestId") != request_id:
+            if not _is_answer_entry(entry, request_id):
                 continue
             text = entry.get("text")
             if isinstance(text, str) and text:
@@ -94,35 +108,101 @@ def fallback_bot_text(message: dict[str, Any]) -> str | None:
     return None
 
 
+# How many consecutive snapshot-free frames may be released before we stop
+# waiting for a healing snapshot. Substrate does not deliver every character
+# through writeAtCursor: some segments only ever show up in messages[].text.
+# Releasing a delta immediately makes any segment it skipped unrecoverable,
+# so delta-only frames are held for a short window first.
+HEAL_WINDOW_FRAMES = 4
+
+# Tail sizes tried when re-anchoring an already-released prefix inside a
+# snapshot. Bounded so a diverged turn stays O(1) per frame.
+_ANCHOR_SIZES = (64, 32, 16, 8)
+
+
+def released_offset_in(snapshot: str, released: str) -> int | None:
+    """
+    Return how much of ``snapshot`` is already covered by ``released`` text.
+
+    Normally ``released`` is a prefix of the snapshot. After an unrecoverable
+    gap (text streamed while a segment was missing) it is not, so the tail of
+    the released text is located inside the snapshot instead and streaming
+    re-anchors there. ``None`` means the snapshot is unrelated (history echo,
+    a different answer) and must be ignored.
+    """
+    if not released:
+        return 0
+    if snapshot.startswith(released):
+        return len(released)
+    sizes = [size for size in _ANCHOR_SIZES if size <= len(released)] or [len(released)]
+    for size in sizes:
+        index = snapshot.rfind(released[-size:])
+        if index != -1:
+            return index + size
+    return None
+
+
 class CumulativeTextReconstructor:
     """
     Reconstruct streaming bot text from writeAtCursor deltas and messages[] snapshots.
 
-    Keeps an assembled string from concatenated deltas per turn. On each frame the
-    candidate is the longer of the request-scoped snapshot and assembled text. New
-    suffixes are yielded; frames that would rewind are ignored.
+    Keeps an assembled string per turn: concatenated deltas, healed by the
+    request-scoped cumulative snapshot whenever one arrives. Only new suffixes
+    are released; frames that would rewind are ignored.
+
+    Deltas alone are not trusted to be complete, so a run of snapshot-free
+    frames is held back for up to ``heal_window_frames`` frames. Text released
+    to the client cannot be retracted, and a snapshot can only fill a gap that
+    is still ahead of the release point. Pass ``heal_window_frames=0`` to
+    release every delta immediately (no gap healing).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, heal_window_frames: int = HEAL_WINDOW_FRAMES) -> None:
         self._assembled = ""
-        self._emitted_len = 0
+        self._released_len = 0
+        self._heal_window_frames = heal_window_frames
+        self._frames_held = 0
 
     def feed(self, message: dict[str, Any], request_id: str | None = None) -> str | None:
         for delta in write_at_cursor_deltas(message):
             self._assembled += delta
 
         snapshot = snapshot_bot_text(message, request_id)
-        candidate = self._assembled
-        if snapshot and len(snapshot) > len(candidate):
-            # Only adopt a longer snapshot when it extends what was already emitted.
-            if self._emitted_len == 0 or snapshot[: self._emitted_len] == self._assembled[: self._emitted_len]:
-                candidate = snapshot
+        confirmed = self._apply_snapshot(snapshot) if snapshot else False
 
-        if len(candidate) <= self._emitted_len:
+        if len(self._assembled) <= self._released_len:
             return None
 
-        chunk = candidate[self._emitted_len :]
-        self._emitted_len = len(candidate)
-        # Re-base so later writeAtCursor deltas append to the healed text.
-        self._assembled = candidate
-        return chunk if chunk else None
+        if not confirmed:
+            self._frames_held += 1
+            if self._frames_held < self._heal_window_frames:
+                return None
+
+        return self._release()
+
+    def flush(self) -> str | None:
+        """Release anything still held back (end of turn)."""
+        if len(self._assembled) <= self._released_len:
+            return None
+        return self._release()
+
+    def _apply_snapshot(self, snapshot: str) -> bool:
+        """Heal assembled text from a cumulative snapshot; True when it lines up."""
+        released = self._assembled[: self._released_len]
+        if len(snapshot) <= len(self._assembled):
+            # Snapshot lags the delta stream; it only confirms alignment.
+            return self._assembled.startswith(snapshot)
+
+        offset = released_offset_in(snapshot, released)
+        if offset is None or offset < self._released_len:
+            return False
+
+        self._assembled = snapshot
+        self._released_len = offset
+        return True
+
+    def _release(self) -> str | None:
+        chunk = self._assembled[self._released_len :]
+        self._released_len = len(self._assembled)
+        self._frames_held = 0
+        return chunk or None

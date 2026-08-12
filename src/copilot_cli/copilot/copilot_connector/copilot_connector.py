@@ -217,11 +217,19 @@ class CopilotConnector:
                             fallback_text = parsed.copilot_message
 
                     if msg_type == 3:
+                        tail = reconstructor.flush()
+                        if tail:
+                            outcome.deltas_yielded = True
+                            yield tail
                         if not outcome.deltas_yielded and fallback_text:
                             outcome.deltas_yielded = True
                             yield fallback_text
                         return
 
+            tail = reconstructor.flush()
+            if tail:
+                outcome.deltas_yielded = True
+                yield tail
             if not outcome.deltas_yielded and fallback_text:
                 outcome.deltas_yielded = True
                 yield fallback_text
