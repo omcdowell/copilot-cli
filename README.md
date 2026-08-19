@@ -65,7 +65,7 @@ pi -e ./pi-extension
 
 In Pi: `/model m365-copilot/default`
 
-The proxy exposes `GET /v1/models` and `POST /v1/chat/completions` on `http://127.0.0.1:8787/v1` (override the bind address with `--host`). Pi keeps local tools; Copilot is the reasoning backend. Tool calling is emulated via Hermes-style `<tool_call>` XML.
+The proxy exposes `GET /v1/models` and `POST /v1/chat/completions` on `http://127.0.0.1:8787/v1` (override the bind address with `--host`). Pi keeps local tools; Copilot is the reasoning backend. Tool calling is emulated with `tool_call` / `tool_response` markdown fences. Continuations send a short reminder by default; pass `--tool-protocol full` to re-send the overlay and tools catalog if the model drops the format.
 
 ### Streaming fidelity
 

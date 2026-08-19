@@ -76,15 +76,15 @@ def test_live_sse_holdback_streams_prose_then_tool_calls():
     tool_block = (
         f"{TOOL_OPEN_TAG}\n"
         '{"name": "read", "arguments": {"path": "a.py"}}\n'
-        "</tool_call>"
+        "```"
     )
     deltas = [
         "I'll check ",
         "that file.",
-        "\n<",
-        "tool_call>\n",
+        "\n```",
+        "tool_call\n",
         '{"name": "read", "arguments": {"path": "a.py"}}\n',
-        "</tool_call>",
+        "```",
     ]
     frames = list(
         iter_live_sse(
@@ -127,12 +127,37 @@ def test_live_sse_holdback_flushes_when_no_tool_tag():
     assert payloads[-2]["choices"][0]["finish_reason"] == "stop"
 
 
+def test_live_sse_python_fence_is_content_not_tool_call():
+    deltas = [
+        "Here's code:\n",
+        "```python\n",
+        "print(1)\n",
+        "```",
+    ]
+    frames = list(
+        iter_live_sse(
+            completion_id="chatcmpl-pyfence",
+            created=5,
+            model="default",
+            deltas=iter(deltas),
+            watch_tools=True,
+            allowed_tool_names={"read"},
+        )
+    )
+    payloads = _parse_sse(frames)
+    content = "".join(_content_pieces(payloads))
+
+    assert "```python" in content
+    assert "print(1)" in content
+    assert payloads[-2]["choices"][0]["finish_reason"] == "stop"
+
+
 def test_live_sse_streams_prose_after_tool_call():
     deltas = [
         "Before.\n",
-        "<tool_call>\n",
+        "```tool_call\n",
         '{"name": "read", "arguments": {"path": "a.py"}}\n',
-        "</tool_call>\n",
+        "```\n",
         "After.",
     ]
     frames = list(
@@ -157,7 +182,7 @@ def test_live_sse_streams_prose_after_tool_call():
 def test_live_sse_salvages_unclosed_tool_call():
     deltas = [
         "I'll read it.\n",
-        '<tool_call>{"name": "read", "arguments": {"path": "a.py"}}',
+        '```tool_call\n{"name": "read", "arguments": {"path": "a.py"}}',
     ]
     frames = list(
         iter_live_sse(
@@ -173,14 +198,14 @@ def test_live_sse_salvages_unclosed_tool_call():
     content = "".join(_content_pieces(payloads))
 
     assert content == "I'll read it.\n"
-    assert "<tool_call>" not in content
+    assert TOOL_OPEN_TAG not in content
     assert payloads[-2]["choices"][0]["finish_reason"] == "tool_calls"
 
 
 def test_live_sse_suppresses_unclosed_invalid_tool_call():
     deltas = [
         "Here we go.\n",
-        '<tool_call>{"name": "read", "arguments": {broken',
+        '```tool_call\n{"name": "read", "arguments": {broken',
     ]
     frames = list(
         iter_live_sse(
@@ -196,7 +221,7 @@ def test_live_sse_suppresses_unclosed_invalid_tool_call():
     content = "".join(_content_pieces(payloads))
 
     assert content == "Here we go.\n"
-    assert "<tool_call>" not in content
+    assert TOOL_OPEN_TAG not in content
     assert "broken" not in content
     assert payloads[-2]["choices"][0]["finish_reason"] == "stop"
 
@@ -204,9 +229,9 @@ def test_live_sse_suppresses_unclosed_invalid_tool_call():
 def test_live_sse_unknown_tool_demoted_to_content():
     deltas = [
         "Trying.\n",
-        "<tool_call>\n",
+        "```tool_call\n",
         '{"name": "rogue", "arguments": {"x": 1}}\n',
-        "</tool_call>",
+        "```",
     ]
     frames = list(
         iter_live_sse(
@@ -228,9 +253,9 @@ def test_live_sse_unknown_tool_demoted_to_content():
 
 def test_live_sse_parses_case_variant_tags():
     deltas = [
-        "<TOOL_CALL>\n",
+        "```TOOL_CALL\n",
         '{"name": "read", "arguments": {"path": "a.py"}}\n',
-        "</Tool_Call>",
+        "```",
     ]
     frames = list(
         iter_live_sse(
@@ -266,7 +291,7 @@ def test_streaming_completion_emits_finish_reason():
 
 
 def test_streaming_completion_parses_tool_calls():
-    reply = 'Working on it.\n<tool_call>\n{"name": "read", "arguments": {"path": "a.py"}}\n</tool_call>'
+    reply = 'Working on it.\n```tool_call\n{"name": "read", "arguments": {"path": "a.py"}}\n```'
     frames = list(
         iter_streaming_completion(
             completion_id="chatcmpl-live-tools",

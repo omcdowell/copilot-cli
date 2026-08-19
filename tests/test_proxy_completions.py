@@ -94,6 +94,49 @@ def test_pi_tool_loop_does_not_resend_system_prompt(monkeypatch):
     assert len(RecordingAutomator.prompts) == 2
     assert PI_SYSTEM in RecordingAutomator.prompts[0]
     assert "list files" in RecordingAutomator.prompts[0]
+    assert "## Local tools" in RecordingAutomator.prompts[0]
+    assert "## Session context" in RecordingAutomator.prompts[0]
+    assert "## User request" in RecordingAutomator.prompts[0]
     assert PI_SYSTEM not in RecordingAutomator.prompts[1]
     assert "README.md" in RecordingAutomator.prompts[1]
+    assert "```tool_response" in RecordingAutomator.prompts[1]
+    assert "Continue. Local tool protocol is unchanged" in RecordingAutomator.prompts[1]
+    assert "## Local tools" not in RecordingAutomator.prompts[1]
     assert RecordingAutomator.instances == 1
+
+
+def test_full_tool_protocol_reinjects_catalog_on_continuation(monkeypatch):
+    RecordingAutomator.prompts = []
+    RecordingAutomator.instances = 0
+    monkeypatch.setattr(
+        "copilot_cli.copilot.openai_proxy.session_store.ChatAutomator",
+        RecordingAutomator,
+    )
+
+    client = create_app(_args(), tool_protocol="full").test_client()
+    first_messages = [
+        {"role": "system", "content": PI_SYSTEM},
+        {"role": "user", "content": "list files"},
+    ]
+    tool_loop_messages = [
+        *first_messages,
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "bash", "content": "README.md"},
+    ]
+    payload = {"model": "default", "stream": True, "tools": [BASH_TOOL]}
+
+    client.post("/v1/chat/completions", json={**payload, "messages": first_messages}).get_data()
+    client.post("/v1/chat/completions", json={**payload, "messages": tool_loop_messages}).get_data()
+
+    assert "## Local tools" in RecordingAutomator.prompts[1]
+    assert "```tools" in RecordingAutomator.prompts[1]
+    assert "Continue. Local tool protocol is unchanged" not in RecordingAutomator.prompts[1]

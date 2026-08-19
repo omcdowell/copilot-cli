@@ -35,6 +35,6 @@ def run(args) -> None:
         if args.gui:
             Gui().run(output_dir)
     elif args.command == "serve":
-        run_server(parsed, host=args.host, port=args.port)
+        run_server(parsed, host=args.host, port=args.port, tool_protocol=args.tool_protocol)
     else:
         raise SystemExit(f"Unknown command: {args.command}")

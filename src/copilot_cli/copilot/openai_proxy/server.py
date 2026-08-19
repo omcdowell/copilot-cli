@@ -21,6 +21,7 @@ from copilot_cli.copilot.openai_proxy.session_store import SessionStore
 from copilot_cli.copilot.openai_proxy.stream_chunks import iter_live_sse_with_keepalive
 from copilot_cli.copilot.loggers.stream_trace import TRACE_ENV_VAR, StreamTrace
 from copilot_cli.copilot.openai_proxy.tool_parser import parse_tool_calls, to_openai_tool_calls
+from copilot_cli.copilot.openai_proxy.tool_protocol import ToolProtocolMode
 
 DEFAULT_MODEL_ID = "m365-copilot"
 
@@ -76,9 +77,14 @@ def _allowed_tool_names(tools: list[dict[str, Any]] | None) -> set[str] | None:
     return names or None
 
 
-def create_app(chat_arguments: ChatArguments) -> Flask:
+def create_app(
+    chat_arguments: ChatArguments,
+    *,
+    tool_protocol: ToolProtocolMode | str = ToolProtocolMode.reminder,
+) -> Flask:
     app = Flask(__name__)
     session_store = SessionStore(chat_arguments)
+    protocol_mode = ToolProtocolMode(tool_protocol)
 
     @app.get("/v1/models")
     def list_models() -> Any:
@@ -118,7 +124,7 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
         if is_new_conversation:
             prompt = flatten_messages(messages, tools)
         else:
-            prompt = build_continuation_prompt(messages, tools)
+            prompt = build_continuation_prompt(messages, tools, protocol_mode=protocol_mode)
             if not prompt.strip():
                 return jsonify(
                     {"error": {"message": "No continuation content found", "type": "invalid_request_error"}}
@@ -188,6 +194,7 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
         content, parsed_tool_calls = parse_tool_calls(
             response_text,
             allowed_tool_names=allowed_tool_names,
+            salvage_unclosed=True,
         )
 
         if parsed_tool_calls:
@@ -228,10 +235,18 @@ def create_app(chat_arguments: ChatArguments) -> Flask:
     return app
 
 
-def run_server(chat_arguments: ChatArguments, host: str, port: int) -> None:
-    app = create_app(chat_arguments)
+def run_server(
+    chat_arguments: ChatArguments,
+    host: str,
+    port: int,
+    *,
+    tool_protocol: ToolProtocolMode | str = ToolProtocolMode.reminder,
+) -> None:
+    protocol_mode = ToolProtocolMode(tool_protocol)
+    app = create_app(chat_arguments, tool_protocol=protocol_mode)
     print(build_identity())
     print(f"M365 Copilot OpenAI proxy listening on http://{host}:{port}/v1")
+    print(f"Continuation tool protocol: {protocol_mode.value}")
     if StreamTrace().enabled:
         print("Tracing raw Substrate frames (contains prompt and answer text).")
     app.run(host=host, port=port, threaded=True)

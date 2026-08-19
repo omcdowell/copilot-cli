@@ -1,8 +1,8 @@
 """Synthesize OpenAI chat.completion.chunk SSE frames.
 
-Live path holds back a short character window so we can detect Hermes
-``<tool_call>`` tags without waiting for the full Substrate reply. Already-sent
-SSE tokens cannot be retracted — the holdback is what prevents leaking the tag.
+Live path holds back a short character window so we can detect tool_call
+fences without waiting for the full Substrate reply. Already-sent SSE tokens
+cannot be retracted — the holdback is what prevents leaking the fence opener.
 """
 
 from __future__ import annotations
@@ -275,11 +275,11 @@ def iter_live_sse(
     allowed_tool_names: set[str] | None = None,
 ) -> Iterator[str]:
     """
-    Stream Substrate deltas as OpenAI SSE with optional Hermes tool detection.
+    Stream Substrate deltas as OpenAI SSE with optional tool_call fence detection.
 
     When ``watch_tools`` is true, the last ``holdback_chars`` characters are not
-    flushed until it is clear they are not the start of ``<tool_call>``. Once
-    that opening tag is seen, content streaming stops; remaining deltas are
+    flushed until it is clear they are not the start of a ``tool_call`` fence. Once
+    that opening fence is seen, content streaming stops; remaining deltas are
     buffered and parsed into OpenAI ``tool_calls`` at the end.
     """
     yield _role_frame(completion_id, created, model)
@@ -415,7 +415,7 @@ def iter_streaming_completion(
         return
 
     response_text = result.get("text") or ""
-    content, tool_calls = parse_tool_calls(response_text)
+    content, tool_calls = parse_tool_calls(response_text, salvage_unclosed=True)
     yield from _iter_reply_frames(
         completion_id=completion_id,
         created=created,

@@ -136,6 +136,15 @@ def parse_arguments() -> argparse.Namespace:
         metavar="HOST",
         help="HTTP listen address (default: 127.0.0.1)",
     )
+    proxy.add_argument(
+        "--tool-protocol",
+        choices=["reminder", "full"],
+        default="reminder",
+        help=(
+            "Continuation tool preamble: 'reminder' (default) sends a short "
+            "tool_call reminder; 'full' re-sends overlay and tools catalog"
+        ),
+    )
 
     return parser.parse_args()
 

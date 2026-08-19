@@ -1,9 +1,13 @@
-import json
-
 from copilot_cli.copilot.openai_proxy.message_flattener import (
+    build_continuation_prompt,
     count_user_messages,
     extract_latest_user_message,
     flatten_messages,
+)
+from copilot_cli.copilot.openai_proxy.tool_protocol import (
+    CONTINUATION_REMINDER,
+    RECENCY_FOOTER,
+    ToolProtocolMode,
 )
 
 
@@ -16,10 +20,13 @@ def test_flatten_basic_roles():
     ]
     prompt = flatten_messages(messages)
 
-    assert "[System]: Be helpful." in prompt
+    assert "## Session context" in prompt
+    assert "Be helpful." in prompt
     assert "[User]: Hello" in prompt
     assert "[Assistant]: Hi there" in prompt
-    assert "[User]: Thanks" in prompt
+    assert "## User request" in prompt
+    assert "Thanks" in prompt
+    assert "[User]: Thanks" not in prompt
 
 
 def test_flatten_tool_result_message():
@@ -39,10 +46,12 @@ def test_flatten_tool_result_message():
     ]
     prompt = flatten_messages(messages)
 
-    assert "<tool_call>" in prompt
+    assert "```tool_call" in prompt
     assert '"name": "bash"' in prompt
-    assert "<tool_response>" in prompt
+    assert "```tool_response" in prompt
     assert "file.txt" in prompt
+    assert "<tool_call>" not in prompt
+    assert "<tool_response>" not in prompt
 
 
 def test_flatten_injects_tool_protocol():
@@ -56,12 +65,23 @@ def test_flatten_injects_tool_protocol():
             },
         }
     ]
-    messages = [{"role": "user", "content": "read README"}]
+    messages = [
+        {"role": "system", "content": "You are Pi."},
+        {"role": "user", "content": "read README"},
+    ]
     prompt = flatten_messages(messages, tools)
 
-    assert "<tools>" in prompt
+    assert prompt.startswith("## Local tools")
+    assert "```tools" in prompt
     assert '"name": "read"' in prompt
-    assert "<tool_call>" in prompt
+    assert "```tool_call" in prompt
+    assert "## Session context" in prompt
+    assert "You are Pi." in prompt
+    assert "## User request" in prompt
+    assert "read README" in prompt
+    assert prompt.rstrip().endswith(RECENCY_FOOTER)
+    assert "<tools>" not in prompt
+    assert "You are a function calling AI model" not in prompt
 
 
 def test_extract_latest_user_message():
@@ -75,9 +95,7 @@ def test_extract_latest_user_message():
     assert count_user_messages(messages) == 2
 
 
-def test_build_continuation_forwards_tool_results():
-    from copilot_cli.copilot.openai_proxy.message_flattener import build_continuation_prompt
-
+def test_build_continuation_tool_loop_reminder_only():
     tools = [
         {
             "type": "function",
@@ -105,15 +123,50 @@ def test_build_continuation_forwards_tool_results():
     ]
     prompt = build_continuation_prompt(messages, tools)
 
-    assert "<tools>" in prompt
-    assert "<tool_response>" in prompt
+    assert prompt.startswith(CONTINUATION_REMINDER)
+    assert "```tool_call" in prompt
+    assert "```tool_response" in prompt
     assert "README.md" in prompt
     assert "[System]" not in prompt
+    assert "## Local tools" not in prompt
+    assert "```tools" not in prompt
+    assert "tool_response fences" not in prompt
+
+
+def test_build_continuation_full_reinjects_catalog():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run a shell command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            },
+        }
+    ]
+    messages = [
+        {"role": "user", "content": "list files"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "bash", "content": "README.md"},
+    ]
+    prompt = build_continuation_prompt(messages, tools, protocol_mode=ToolProtocolMode.full)
+
+    assert prompt.startswith("## Local tools")
+    assert "```tools" in prompt
+    assert "```tool_response" in prompt
+    assert CONTINUATION_REMINDER not in prompt
 
 
 def test_build_continuation_falls_back_to_latest_user():
-    from copilot_cli.copilot.openai_proxy.message_flattener import build_continuation_prompt
-
     messages = [
         {"role": "user", "content": "first"},
         {"role": "assistant", "content": "ack"},
@@ -121,4 +174,27 @@ def test_build_continuation_falls_back_to_latest_user():
     ]
     prompt = build_continuation_prompt(messages)
 
-    assert prompt == "second question"
+    assert "## User request" in prompt
+    assert "second question" in prompt
+    assert CONTINUATION_REMINDER not in prompt
+
+
+def test_build_continuation_user_turn_with_tools_sandwiches_request():
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "read", "parameters": {"type": "object"}},
+        }
+    ]
+    messages = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "ack"},
+        {"role": "user", "content": "now read a.py"},
+    ]
+    prompt = build_continuation_prompt(messages, tools)
+
+    assert prompt.startswith(CONTINUATION_REMINDER)
+    assert "## User request" in prompt
+    assert "now read a.py" in prompt
+    assert prompt.rstrip().endswith(RECENCY_FOOTER)
+    assert "```tools" not in prompt

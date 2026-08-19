@@ -1,4 +1,4 @@
-"""Parse Hermes-style <tool_call> blocks from Copilot text responses."""
+"""Parse ```tool_call fenced JSON blocks from Copilot text responses."""
 
 from __future__ import annotations
 
@@ -12,28 +12,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_TOOL_OPEN_TAG = "<tool_call>"
-_ESCAPED_OPEN_TAG = "&lt;tool_call&gt;"
-TOOL_OPEN_TAG = _TOOL_OPEN_TAG
-TOOL_HOLDBACK_CHARS = max(len(_TOOL_OPEN_TAG), len(_ESCAPED_OPEN_TAG))
+TOOL_OPEN_FENCE = "```tool_call"
+TOOL_OPEN_TAG = TOOL_OPEN_FENCE  # streaming tests and holdback needle
+# Hold enough suffix to distinguish ```tool_call from ```python / ```json / ```.
+TOOL_HOLDBACK_CHARS = 16
 
-_TOOL_CALL_PATTERN = re.compile(
-    r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
-    re.DOTALL | re.IGNORECASE,
-)
-_UNCLOSED_TOOL_CALL_PATTERN = re.compile(
-    r"<tool_call>\s*(\{.*)\s*$",
-    re.DOTALL | re.IGNORECASE,
-)
-_FENCED_TOOL_BLOCK_PATTERN = re.compile(
-    r"```(?:\w+)?\s*(<tool_call>.*?</tool_call>)\s*```",
-    re.DOTALL | re.IGNORECASE,
-)
-_FENCED_UNCLOSED_TOOL_BLOCK_PATTERN = re.compile(
-    r"```(?:\w+)?\s*(<tool_call>.*)\s*```?\s*$",
-    re.DOTALL | re.IGNORECASE,
-)
-_TOOL_MARKUP_PATTERN = re.compile(r"<tool_call>", re.IGNORECASE)
+_OPEN_FENCE = re.compile(r"```[ \t]*tool_call\b[^\n]*", re.IGNORECASE)
+_CLOSE_FENCE = re.compile(r"\s*```(?![ \t]*tool_call\b)[ \t]*", re.IGNORECASE)
+_TOOL_MARKUP_PATTERN = _OPEN_FENCE
 
 
 @dataclass(frozen=True)
@@ -51,11 +37,7 @@ def _snippet(text: str, *, limit: int = 120) -> str:
 
 
 def _normalize_text(text: str) -> str:
-    """Strip fences and HTML escapes so tag scanning tolerates noisy model output."""
-    normalized = html.unescape(text)
-    normalized = _FENCED_TOOL_BLOCK_PATTERN.sub(r"\1", normalized)
-    normalized = _FENCED_UNCLOSED_TOOL_BLOCK_PATTERN.sub(r"\1", normalized)
-    return normalized
+    return html.unescape(text)
 
 
 def has_tool_call_markup(text: str) -> bool:
@@ -63,14 +45,9 @@ def has_tool_call_markup(text: str) -> bool:
 
 
 def find_tool_open_tag(text: str) -> int:
-    """Return the start index of the earliest open tag (raw or HTML-escaped)."""
-    lowered = text.lower()
-    indices = [
-        lowered.find(_TOOL_OPEN_TAG),
-        lowered.find(_ESCAPED_OPEN_TAG.lower()),
-    ]
-    found = [index for index in indices if index != -1]
-    return min(found) if found else -1
+    """Return the start index of the earliest ```tool_call fence, or -1."""
+    match = _OPEN_FENCE.search(text)
+    return match.start() if match else -1
 
 
 def remaining_content_after_streamed(content: str | None, streamed_prefix: str) -> str:
@@ -86,12 +63,25 @@ def remaining_content_after_streamed(content: str | None, streamed_prefix: str) 
     return ""
 
 
-def _parse_block_payload(payload_raw: str, raw_snippet: str) -> ParsedToolCall | None:
+def _decode_json_at(text: str, pos: int) -> tuple[Any, int] | None:
+    slice_ = text[pos:]
+    stripped = slice_.lstrip()
+    skipped = len(slice_) - len(stripped)
     try:
-        payload = json.loads(payload_raw)
+        payload, end = json.JSONDecoder().raw_decode(stripped)
     except json.JSONDecodeError:
-        logger.warning("JSON parse failed for tool_call block: %s", _snippet(raw_snippet))
         return None
+    return payload, pos + skipped + end
+
+
+def _consume_close_fence(text: str, pos: int) -> int | None:
+    match = _CLOSE_FENCE.match(text, pos)
+    if match is None:
+        return None
+    return match.end()
+
+
+def _parse_block_payload(payload: Any, raw_snippet: str) -> ParsedToolCall | None:
     if not isinstance(payload, dict):
         logger.warning("tool_call payload is not an object: %s", _snippet(raw_snippet))
         return None
@@ -146,38 +136,43 @@ def parse_tool_calls(
     tool_calls: list[ParsedToolCall] = []
     content_parts: list[str] = []
     last_end = 0
+    search_from = 0
 
-    for match in _TOOL_CALL_PATTERN.finditer(normalized):
-        block_start, block_end = match.span()
-        raw_snippet = match.group(0)
+    while True:
+        match = _OPEN_FENCE.search(normalized, search_from)
+        if match is None:
+            break
+
+        decoded = _decode_json_at(normalized, match.end())
+        if decoded is None:
+            logger.warning("JSON parse failed for tool_call block: %s", _snippet(match.group(0)))
+            search_from = match.start() + 3
+            continue
+
+        payload, json_end = decoded
+        close_end = _consume_close_fence(normalized, json_end)
+        if close_end is None:
+            if not salvage_unclosed:
+                search_from = match.start() + 3
+                continue
+            block_end = json_end
+        else:
+            block_end = close_end
+
+        raw_snippet = normalized[match.start() : block_end]
         call = _accept_tool_call(
-            _parse_block_payload(match.group(1), raw_snippet),
+            _parse_block_payload(payload, raw_snippet),
             allowed_tool_names=allowed_tool_names,
             raw_snippet=raw_snippet,
         )
         if call is None:
+            search_from = match.start() + 3
             continue
-        content_parts.append(normalized[last_end:block_start])
-        last_end = block_end
-        tool_calls.append(call)
 
-    trailing = normalized[last_end:]
-    if salvage_unclosed and _TOOL_MARKUP_PATTERN.search(trailing):
-        closed_after_markup = re.search(r"</tool_call>\s*$", trailing, re.IGNORECASE) is None
-        if closed_after_markup:
-            unclosed = _UNCLOSED_TOOL_CALL_PATTERN.search(trailing)
-            if unclosed:
-                raw_snippet = unclosed.group(0)
-                call = _accept_tool_call(
-                    _parse_block_payload(unclosed.group(1), raw_snippet),
-                    allowed_tool_names=allowed_tool_names,
-                    raw_snippet=raw_snippet,
-                )
-                if call is not None:
-                    content_parts.append(trailing[: unclosed.start()])
-                    last_end = len(normalized)
-                    tool_calls.append(call)
-                    trailing = ""
+        content_parts.append(normalized[last_end : match.start()])
+        last_end = block_end
+        search_from = block_end
+        tool_calls.append(call)
 
     if not tool_calls:
         if has_tool_call_markup(text):
@@ -187,7 +182,7 @@ def parse_tool_calls(
             )
         return text, []
 
-    cleaned = "".join(content_parts) + trailing
+    cleaned = "".join(content_parts) + normalized[last_end:]
     cleaned = cleaned.strip()
     content = cleaned if cleaned else None
     return content, tool_calls

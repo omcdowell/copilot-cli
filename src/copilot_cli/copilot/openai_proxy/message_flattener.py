@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from copilot_cli.copilot.openai_proxy.tool_protocol import build_tool_protocol_prompt
+from copilot_cli.copilot.openai_proxy.tool_protocol import (
+    RECENCY_FOOTER,
+    TOOL_CALL_FENCE,
+    TOOL_RESPONSE_FENCE,
+    ToolProtocolMode,
+    build_continuation_header,
+    build_local_tools_section,
+    format_fence,
+)
 
 
 def _message_content(message: Mapping[str, Any]) -> str:
@@ -24,6 +32,28 @@ def _message_content(message: Mapping[str, Any]) -> str:
     return str(content)
 
 
+def _tool_payload(content: str) -> Any:
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return content
+
+
+def _format_tool_call_fence(tool_call: Mapping[str, Any]) -> str:
+    function = tool_call.get("function", {})
+    name = function.get("name", "")
+    arguments = function.get("arguments", "{}")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = {"raw": arguments}
+    return format_fence(
+        TOOL_CALL_FENCE,
+        json.dumps({"name": name, "arguments": arguments}),
+    )
+
+
 def _format_assistant_message(message: Mapping[str, Any]) -> str:
     tool_calls = message.get("tool_calls")
     parts: list[str] = []
@@ -32,18 +62,34 @@ def _format_assistant_message(message: Mapping[str, Any]) -> str:
         parts.append(f"[Assistant]: {content}")
     if tool_calls:
         for tool_call in tool_calls:
-            function = tool_call.get("function", {})
-            name = function.get("name", "")
-            arguments = function.get("arguments", "{}")
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError:
-                    arguments = {"raw": arguments}
-            parts.append(
-                f"<tool_call>\n{json.dumps({'name': name, 'arguments': arguments})}\n</tool_call>"
-            )
+            parts.append(_format_tool_call_fence(tool_call))
     return "\n".join(parts)
+
+
+def _format_tool_message(message: Mapping[str, Any]) -> str:
+    content = _message_content(message)
+    tool_name = message.get("name", "tool")
+    payload = {"name": tool_name, "content": _tool_payload(content)}
+    return format_fence(TOOL_RESPONSE_FENCE, json.dumps(payload))
+
+
+def _format_message(message: Mapping[str, Any]) -> str:
+    role = message.get("role", "")
+    if role == "system":
+        content = _message_content(message)
+        return content
+    if role == "user":
+        content = _message_content(message)
+        return f"[User]: {content}" if content else ""
+    if role == "assistant":
+        return _format_assistant_message(message)
+    if role == "tool":
+        return _format_tool_message(message)
+    return ""
+
+
+def _join_sections(sections: Iterable[str]) -> str:
+    return "\n\n".join(section for section in sections if section)
 
 
 def flatten_messages(
@@ -53,41 +99,62 @@ def flatten_messages(
     """
     Flatten OpenAI-style messages into a single prompt string for Copilot.
 
-    System messages are inlined as [System] blocks. Tool results use Hermes
-    <tool_response> tags so the model can continue tool loops.
-    """
-    parts: list[str] = []
-    for message in messages:
-        role = message.get("role", "")
-        if role == "system":
-            content = _message_content(message)
-            if content:
-                parts.append(f"[System]: {content}")
-        elif role == "user":
-            content = _message_content(message)
-            if content:
-                parts.append(f"[User]: {content}")
-        elif role == "assistant":
-            formatted = _format_assistant_message(message)
-            if formatted:
-                parts.append(formatted)
-        elif role == "tool":
-            content = _message_content(message)
-            tool_name = message.get("name", "tool")
-            payload = content
-            try:
-                payload = json.loads(content)
-            except (json.JSONDecodeError, TypeError):
-                payload = {"result": content}
-            parts.append(
-                f"<tool_response>\n{json.dumps({'name': tool_name, 'content': payload})}\n</tool_response>"
-            )
+    Turn-1 shape when tools are present:
 
-    body = "\n\n".join(parts)
+        ## Local tools  (overlay + ```tools catalog)
+        ## Session context  (Pi / client system prompt, wrapped not rewritten)
+        [intermediate transcript]
+        ## User request
+        recency footer
+    """
+    systems: list[str] = []
+    rest: list[Mapping[str, Any]] = []
+    for message in messages:
+        if message.get("role") == "system":
+            content = _message_content(message)
+            if content:
+                systems.append(content)
+        else:
+            rest.append(message)
+
+    last_user_index = None
+    for index in range(len(rest) - 1, -1, -1):
+        if rest[index].get("role") == "user":
+            last_user_index = index
+            break
+
+    if last_user_index is None:
+        history_before: Sequence[Mapping[str, Any]] = rest
+        last_user = None
+        history_after: Sequence[Mapping[str, Any]] = ()
+    else:
+        history_before = rest[:last_user_index]
+        last_user = rest[last_user_index]
+        history_after = rest[last_user_index + 1 :]
+
+    sections: list[str] = []
     if tools:
-        protocol = build_tool_protocol_prompt(tools)
-        return f"{protocol}\n\n{body}" if body else protocol
-    return body
+        sections.append(build_local_tools_section(tools))
+    if systems:
+        sections.append("## Session context\n\n" + "\n\n".join(systems))
+
+    before_text = _join_sections(_format_message(message) for message in history_before)
+    if before_text:
+        sections.append(before_text)
+
+    if last_user is not None:
+        user_content = _message_content(last_user)
+        if user_content:
+            sections.append(f"## User request\n\n{user_content}")
+
+    after_text = _join_sections(_format_message(message) for message in history_after)
+    if after_text:
+        sections.append(after_text)
+
+    if tools:
+        sections.append(RECENCY_FOOTER)
+
+    return _join_sections(sections)
 
 
 def extract_latest_user_message(messages: Sequence[Mapping[str, Any]]) -> str | None:
@@ -104,36 +171,48 @@ def count_user_messages(messages: Sequence[Mapping[str, Any]]) -> int:
     return sum(1 for message in messages if message.get("role") == "user")
 
 
+def _trailing_tool_loop(messages: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    trailing: list[Mapping[str, Any]] = []
+    for message in reversed(messages):
+        role = message.get("role")
+        if role in ("tool", "assistant") and (role == "tool" or message.get("tool_calls")):
+            trailing.append(message)
+            continue
+        break
+    trailing.reverse()
+    return trailing
+
+
 def build_continuation_prompt(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    protocol_mode: ToolProtocolMode = ToolProtocolMode.reminder,
 ) -> str:
     """
     Build a follow-up prompt for an existing Substrate conversation.
 
     Prefer tool-result turns (Pi tool loop). Otherwise send the latest user
-    message. When tools are present, re-inject the tool protocol so Copilot
-    keeps emitting <tool_call> markup.
+    message. Continuations default to a short tool_call reminder; ``full``
+    re-sends overlay and catalog.
     """
-    trailing: list[Mapping[str, Any]] = []
-    for message in reversed(messages):
-        role = message.get("role")
-        if role in ("tool", "assistant") and (
-            role == "tool" or message.get("tool_calls")
-        ):
-            trailing.append(message)
-            continue
-        break
-    trailing.reverse()
+    trailing = _trailing_tool_loop(messages)
+    tool_results = [message for message in trailing if message.get("role") == "tool"]
 
-    tool_results = [m for m in trailing if m.get("role") == "tool"]
+    header = build_continuation_header(tools, protocol_mode)
+    sections: list[str] = []
+    if header:
+        sections.append(header)
+
     if tool_results:
-        body = flatten_messages(trailing, tools=None)
-    else:
-        latest = extract_latest_user_message(messages) or ""
-        body = latest
+        body = _join_sections(_format_message(message) for message in trailing)
+        if body:
+            sections.append(body)
+        return _join_sections(sections)
 
+    latest = extract_latest_user_message(messages) or ""
+    if latest:
+        sections.append(f"## User request\n\n{latest}")
     if tools:
-        protocol = build_tool_protocol_prompt(tools)
-        return f"{protocol}\n\n{body}" if body else protocol
-    return body
+        sections.append(RECENCY_FOOTER)
+    return _join_sections(sections)
