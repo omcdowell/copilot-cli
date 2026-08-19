@@ -12,7 +12,6 @@ from flask import Request
 
 from copilot_cli.copilot.chat_automator.chat_automator import ChatAutomator
 from copilot_cli.copilot.models.chat_argument import ChatArguments
-from copilot_cli.copilot.openai_proxy.message_flattener import count_user_messages
 
 
 class SessionStore:
@@ -57,12 +56,12 @@ class SessionStore:
         """
         Decide whether this request should start a fresh Substrate conversation.
 
-        With X-Session-Id / X-Chat-Id: new only on first sight of that ID.
-        Without a header (compat): fall back to counting user messages.
+        A session key is new only until we have created an automator for it.
+        Pi tool-loop turns still have a single user message (system + history +
+        tool results), so counting user messages would reset Substrate every
+        iteration and re-send the Pi system prompt.
         """
-        if SessionStore.session_header(request):
-            return not self.has_session(session_key)
-        return count_user_messages(messages) <= 1
+        return not self.has_session(session_key)
 
     def _lock_for(self, session_key: str) -> threading.Lock:
         with self._meta_lock:

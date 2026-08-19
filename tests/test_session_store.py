@@ -43,10 +43,15 @@ def test_header_session_is_new_only_until_first_sight():
     assert store.is_new_conversation(request, messages, key) is False
 
 
-def test_hash_fallback_uses_user_message_count():
+def test_hash_fallback_reuses_session_after_first_turn():
     store = SessionStore(_args())
     request = _request()
     first = [{"role": "user", "content": "hi"}]
+    tool_loop = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "yo"},
+        {"role": "tool", "name": "bash", "content": "ok"},
+    ]
     second = [
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "yo"},
@@ -56,6 +61,6 @@ def test_hash_fallback_uses_user_message_count():
 
     assert store.is_new_conversation(request, first, key) is True
     store.get_automator(key, is_new_conversation=True)
-    # Without a header, a single-user-message request still looks "new".
-    assert store.is_new_conversation(request, first, key) is True
+    assert store.is_new_conversation(request, first, key) is False
+    assert store.is_new_conversation(request, tool_loop, key) is False
     assert store.is_new_conversation(request, second, key) is False
