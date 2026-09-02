@@ -7,33 +7,15 @@ from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Any
 
+from copilot_cli.copilot.openai_proxy.prompt_config import DEFAULT_PROMPTS, get_prompts
+
 TOOL_CALL_FENCE = "tool_call"
 TOOL_RESPONSE_FENCE = "tool_response"
 TOOLS_CATALOG_FENCE = "tools"
 
-LOCAL_TOOLS_OVERLAY = (
-    "You have access to the tools listed below. They run on the user's machine; "
-    "they are not Microsoft 365 Copilot's built-in workplace tools. "
-    "When (and only when) you need to call a tool, reply with ONLY one or more "
-    "fenced code blocks, each tagged `tool_call` and containing a single JSON "
-    "object of this exact form:\n"
-    "\n"
-    f"```{TOOL_CALL_FENCE}\n"
-    '{"name": "<tool_name>", "arguments": { ... }}\n'
-    "```\n"
-    "\n"
-    "To call several tools at once, emit several such blocks back to back, one JSON "
-    "object each, and nothing else around them. "
-    "Do not add any prose before, between, or after the blocks when calling tools. "
-    "If you do not need a tool, reply normally with your answer."
-)
-
-RECENCY_FOOTER = "If you need a local tool, reply with only ```tool_call fences."
-
-CONTINUATION_REMINDER = (
-    "Continue making any necessary follow-up ```tool_call requests "
-    "until you have completed the task."
-)
+LOCAL_TOOLS_OVERLAY = DEFAULT_PROMPTS.local_tools_overlay
+RECENCY_FOOTER = DEFAULT_PROMPTS.recency_footer
+CONTINUATION_REMINDER = DEFAULT_PROMPTS.continuation_reminder
 
 
 class ToolProtocolMode(str, Enum):
@@ -54,7 +36,11 @@ def format_tools_catalog(tools: Sequence[Mapping[str, Any]]) -> str:
 
 def build_local_tools_section(tools: Sequence[Mapping[str, Any]]) -> str:
     """Turn-1 (and full-mode) overlay plus JSON catalog."""
-    return f"## Local tools\n\n{LOCAL_TOOLS_OVERLAY}\n\n{format_tools_catalog(tools)}"
+    prompts = get_prompts()
+    return (
+        f"{prompts.local_tools_heading}\n\n{prompts.local_tools_overlay}\n\n"
+        f"{format_tools_catalog(tools)}"
+    )
 
 
 def build_continuation_header(
@@ -65,7 +51,7 @@ def build_continuation_header(
         return ""
     if mode is ToolProtocolMode.full:
         return build_local_tools_section(tools)
-    return CONTINUATION_REMINDER
+    return get_prompts().continuation_reminder
 
 
 def build_tool_protocol_prompt(tools: Sequence[Mapping[str, Any]]) -> str:

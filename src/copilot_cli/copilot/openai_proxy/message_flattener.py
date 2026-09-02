@@ -6,8 +6,8 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from copilot_cli.copilot.openai_proxy.prompt_config import get_prompts, render_session_context
 from copilot_cli.copilot.openai_proxy.tool_protocol import (
-    RECENCY_FOOTER,
     TOOL_CALL_FENCE,
     TOOL_RESPONSE_FENCE,
     ToolProtocolMode,
@@ -59,7 +59,8 @@ def _format_assistant_message(message: Mapping[str, Any]) -> str:
     parts: list[str] = []
     content = _message_content(message)
     if content:
-        parts.append(f"[Assistant]: {content}")
+        prefix = get_prompts().assistant_role_prefix
+        parts.append(f"{prefix} {content}")
     if tool_calls:
         for tool_call in tool_calls:
             parts.append(_format_tool_call_fence(tool_call))
@@ -80,7 +81,10 @@ def _format_message(message: Mapping[str, Any]) -> str:
         return content
     if role == "user":
         content = _message_content(message)
-        return f"[User]: {content}" if content else ""
+        if not content:
+            return ""
+        prefix = get_prompts().user_role_prefix
+        return f"{prefix} {content}"
     if role == "assistant":
         return _format_assistant_message(message)
     if role == "tool":
@@ -102,11 +106,12 @@ def flatten_messages(
     Turn-1 shape when tools are present:
 
         ## Local tools  (overlay + ```tools catalog)
-        ## Session context  (Pi / client system prompt, wrapped not rewritten)
+        ## Session context  (config pi_system, or Pi's system prompt if passthrough)
         [intermediate transcript]
         ## User request
         recency footer
     """
+    prompts = get_prompts()
     systems: list[str] = []
     rest: list[Mapping[str, Any]] = []
     for message in messages:
@@ -135,8 +140,14 @@ def flatten_messages(
     sections: list[str] = []
     if tools:
         sections.append(build_local_tools_section(tools))
-    if systems:
-        sections.append("## Session context\n\n" + "\n\n".join(systems))
+    client_system = "\n\n".join(systems)
+    session_context = (
+        client_system
+        if prompts.use_client_system_prompt
+        else render_session_context(prompts.pi_system, client_system)
+    )
+    if session_context:
+        sections.append(f"{prompts.session_context_heading}\n\n{session_context}")
 
     before_text = _join_sections(_format_message(message) for message in history_before)
     if before_text:
@@ -145,14 +156,14 @@ def flatten_messages(
     if last_user is not None:
         user_content = _message_content(last_user)
         if user_content:
-            sections.append(f"## User request\n\n{user_content}")
+            sections.append(f"{prompts.user_request_heading}\n\n{user_content}")
 
     after_text = _join_sections(_format_message(message) for message in history_after)
     if after_text:
         sections.append(after_text)
 
     if tools:
-        sections.append(RECENCY_FOOTER)
+        sections.append(prompts.recency_footer)
 
     return _join_sections(sections)
 
@@ -212,11 +223,12 @@ def build_continuation_prompt(
             sections.append(header)
         return _join_sections(sections)
 
+    prompts = get_prompts()
     if header:
         sections.append(header)
     latest = extract_latest_user_message(messages) or ""
     if latest:
-        sections.append(f"## User request\n\n{latest}")
+        sections.append(f"{prompts.user_request_heading}\n\n{latest}")
     if tools:
-        sections.append(RECENCY_FOOTER)
+        sections.append(prompts.recency_footer)
     return _join_sections(sections)

@@ -20,6 +20,7 @@ from copilot_cli.copilot.openai_proxy.message_flattener import (
 from copilot_cli.copilot.openai_proxy.session_store import SessionStore
 from copilot_cli.copilot.openai_proxy.stream_chunks import iter_live_sse_with_keepalive
 from copilot_cli.copilot.loggers.stream_trace import TRACE_ENV_VAR, StreamTrace
+from copilot_cli.copilot.openai_proxy.prompt_config import ENV_VAR, current_prompts_path, get_prompts
 from copilot_cli.copilot.openai_proxy.tool_parser import parse_tool_calls, to_openai_tool_calls
 from copilot_cli.copilot.openai_proxy.tool_protocol import ToolProtocolMode
 
@@ -247,6 +248,12 @@ def run_server(
     print(build_identity())
     print(f"M365 Copilot OpenAI proxy listening on http://{host}:{port}/v1")
     print(f"Continuation tool protocol: {protocol_mode.value}")
+    get_prompts()
+    prompts_path = current_prompts_path()
+    if prompts_path is None:
+        print(f"Prompts: built-in defaults ({ENV_VAR}=defaults)")
+    else:
+        print(f"Prompts: {prompts_path} (reloaded when the file changes)")
     if StreamTrace().enabled:
         print("Tracing raw Substrate frames (contains prompt and answer text).")
     app.run(host=host, port=port, threaded=True)
