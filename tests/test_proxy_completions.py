@@ -4,6 +4,7 @@ from copilot_cli.copilot.enums.copilot_scenario_enum import CopilotScenarioEnum
 from copilot_cli.copilot.enums.verbose_enum import VerboseEnum
 from copilot_cli.copilot.models.chat_argument import ChatArguments
 from copilot_cli.copilot.openai_proxy.server import create_app
+from copilot_cli.copilot.openai_proxy.tool_protocol import CONTINUATION_REMINDER
 
 PI_SYSTEM = (
     "You are Pi, an interactive CLI tool that helps users with software engineering."
@@ -100,7 +101,8 @@ def test_pi_tool_loop_does_not_resend_system_prompt(monkeypatch):
     assert PI_SYSTEM not in RecordingAutomator.prompts[1]
     assert "README.md" in RecordingAutomator.prompts[1]
     assert "```tool_response" in RecordingAutomator.prompts[1]
-    assert "Continue. Local tool protocol is unchanged" in RecordingAutomator.prompts[1]
+    assert "```tool_call\n" not in RecordingAutomator.prompts[1]
+    assert RecordingAutomator.prompts[1].rstrip().endswith(CONTINUATION_REMINDER)
     assert "## Local tools" not in RecordingAutomator.prompts[1]
     assert RecordingAutomator.instances == 1
 
@@ -139,4 +141,8 @@ def test_full_tool_protocol_reinjects_catalog_on_continuation(monkeypatch):
 
     assert "## Local tools" in RecordingAutomator.prompts[1]
     assert "```tools" in RecordingAutomator.prompts[1]
-    assert "Continue. Local tool protocol is unchanged" not in RecordingAutomator.prompts[1]
+    assert RecordingAutomator.prompts[1].index("```tool_response") < RecordingAutomator.prompts[1].index(
+        "## Local tools"
+    )
+    assert '"command": "ls"' not in RecordingAutomator.prompts[1]
+    assert CONTINUATION_REMINDER not in RecordingAutomator.prompts[1]

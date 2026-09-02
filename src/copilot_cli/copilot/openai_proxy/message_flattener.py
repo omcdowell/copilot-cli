@@ -193,23 +193,27 @@ def build_continuation_prompt(
     Build a follow-up prompt for an existing Substrate conversation.
 
     Prefer tool-result turns (Pi tool loop). Otherwise send the latest user
-    message. Continuations default to a short tool_call reminder; ``full``
-    re-sends overlay and catalog.
+    message. Tool-loop continuations send only ```tool_response fences, then a
+    short tool_call reminder (``full`` re-sends overlay and catalog after the
+    results). User-turn continuations still sandwich the request with the
+    reminder and recency footer.
     """
     trailing = _trailing_tool_loop(messages)
     tool_results = [message for message in trailing if message.get("role") == "tool"]
 
     header = build_continuation_header(tools, protocol_mode)
     sections: list[str] = []
-    if header:
-        sections.append(header)
 
     if tool_results:
-        body = _join_sections(_format_message(message) for message in trailing)
+        body = _join_sections(_format_message(message) for message in tool_results)
         if body:
             sections.append(body)
+        if header:
+            sections.append(header)
         return _join_sections(sections)
 
+    if header:
+        sections.append(header)
     latest = extract_latest_user_message(messages) or ""
     if latest:
         sections.append(f"## User request\n\n{latest}")

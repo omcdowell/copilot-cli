@@ -31,8 +31,8 @@ LOCAL_TOOLS_OVERLAY = (
 RECENCY_FOOTER = "If you need a local tool, reply with only ```tool_call fences."
 
 CONTINUATION_REMINDER = (
-    "Continue. Local tool protocol is unchanged: when you need a local tool, "
-    "reply with only ```tool_call fences."
+    "Continue making any necessary follow-up ```tool_call requests "
+    "until you have completed the task."
 )
 
 

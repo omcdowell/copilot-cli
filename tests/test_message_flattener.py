@@ -123,10 +123,11 @@ def test_build_continuation_tool_loop_reminder_only():
     ]
     prompt = build_continuation_prompt(messages, tools)
 
-    assert prompt.startswith(CONTINUATION_REMINDER)
-    assert "```tool_call" in prompt
-    assert "```tool_response" in prompt
+    assert prompt.startswith("```tool_response")
     assert "README.md" in prompt
+    assert prompt.rstrip().endswith(CONTINUATION_REMINDER)
+    assert "```tool_call\n" not in prompt
+    assert '"command": "ls"' not in prompt
     assert "[System]" not in prompt
     assert "## Local tools" not in prompt
     assert "```tools" not in prompt
@@ -160,9 +161,11 @@ def test_build_continuation_full_reinjects_catalog():
     ]
     prompt = build_continuation_prompt(messages, tools, protocol_mode=ToolProtocolMode.full)
 
-    assert prompt.startswith("## Local tools")
-    assert "```tools" in prompt
     assert "```tool_response" in prompt
+    assert "## Local tools" in prompt
+    assert "```tools" in prompt
+    assert prompt.index("```tool_response") < prompt.index("## Local tools")
+    assert '"command": "ls"' not in prompt
     assert CONTINUATION_REMINDER not in prompt
 
 
