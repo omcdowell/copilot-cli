@@ -172,3 +172,15 @@ def test_fence_without_valid_calls_logs_warning(caplog):
     assert calls == []
     assert content == text
     assert any("no valid tool calls parsed" in record.message for record in caplog.records)
+
+
+def test_incomplete_second_fence_demotes_turn_to_content():
+    text = (
+        _fence('{"name": "bash", "arguments": {"command": "ls"}}')
+        + "\n"
+        + '```tool_call\n{"name": "read", "arguments": {"path": "a.py"'
+    )
+    content, calls = parse_tool_calls(text, salvage_unclosed=True)
+
+    assert calls == []
+    assert content == text

@@ -137,6 +137,7 @@ def parse_tool_calls(
     content_parts: list[str] = []
     last_end = 0
     search_from = 0
+    incomplete_fence = False
 
     while True:
         match = _OPEN_FENCE.search(normalized, search_from)
@@ -146,6 +147,7 @@ def parse_tool_calls(
         decoded = _decode_json_at(normalized, match.end())
         if decoded is None:
             logger.warning("JSON parse failed for tool_call block: %s", _snippet(match.group(0)))
+            incomplete_fence = True
             search_from = match.start() + 3
             continue
 
@@ -180,6 +182,13 @@ def parse_tool_calls(
                 "Tag-like content found but no valid tool calls parsed: %s",
                 _snippet(normalized),
             )
+        return text, []
+
+    if incomplete_fence:
+        logger.warning(
+            "Incomplete extra tool_call fence after %s parsed call(s); demoting turn to content",
+            len(tool_calls),
+        )
         return text, []
 
     cleaned = "".join(content_parts) + normalized[last_end:]

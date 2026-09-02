@@ -16,6 +16,8 @@ from copilot_cli.copilot.models.chat_argument import ChatArguments
 from copilot_cli.copilot.openai_proxy.message_flattener import (
     build_continuation_prompt,
     flatten_messages,
+    outstanding_tool_call_ids,
+    tool_result_ids,
 )
 from copilot_cli.copilot.openai_proxy.session_store import SessionStore
 from copilot_cli.copilot.openai_proxy.stream_chunks import iter_live_sse_with_keepalive
@@ -125,6 +127,20 @@ def create_app(
         if is_new_conversation:
             prompt = flatten_messages(messages, tools)
         else:
+            outstanding = outstanding_tool_call_ids(messages)
+            results = set(tool_result_ids(messages))
+            if outstanding and results < set(outstanding):
+                return jsonify(
+                    {
+                        "error": {
+                            "message": (
+                                "Incomplete tool results: expected results for all "
+                                f"{len(outstanding)} tool_calls before sending to Copilot"
+                            ),
+                            "type": "invalid_request_error",
+                        }
+                    }
+                ), 400
             prompt = build_continuation_prompt(messages, tools, protocol_mode=protocol_mode)
             if not prompt.strip():
                 return jsonify(

@@ -1,4 +1,5 @@
 from copilot_cli.copilot.openai_proxy.message_flattener import (
+    batch_ready,
     build_continuation_prompt,
     count_user_messages,
     extract_latest_user_message,
@@ -201,3 +202,73 @@ def test_build_continuation_user_turn_with_tools_sandwiches_request():
     assert "now read a.py" in prompt
     assert prompt.rstrip().endswith(RECENCY_FOOTER)
     assert "```tools" not in prompt
+
+
+def test_batch_ready_false_when_one_of_two_results():
+    messages = [
+        {"role": "user", "content": "check both"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": '{"path": "a.py"}'},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "bash", "content": "README.md"},
+    ]
+
+    assert batch_ready(messages) is False
+
+
+def test_continuation_two_tool_results_are_one_prompt():
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "bash", "parameters": {"type": "object"}},
+        },
+        {
+            "type": "function",
+            "function": {"name": "read", "parameters": {"type": "object"}},
+        },
+    ]
+    messages = [
+        {"role": "user", "content": "check both"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": '{"path": "a.py"}'},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_2", "name": "read", "content": "def main():\n    pass"},
+        {"role": "tool", "tool_call_id": "call_1", "name": "bash", "content": "README.md\nsrc"},
+    ]
+
+    prompt = build_continuation_prompt(messages, tools)
+
+    assert prompt.count("```tool_response") == 2
+    assert "README.md" in prompt
+    assert "def main():" in prompt
+    assert prompt.index("README.md") < prompt.index("def main():")
+    assert prompt.startswith("```tool_response")
+    assert prompt.rstrip().endswith(CONTINUATION_REMINDER)
+    assert "## Local tools" not in prompt
+    assert "## User request" not in prompt
+    between = prompt.split("```tool_response")[1].split("```tool_response")[0]
+    assert "##" not in between

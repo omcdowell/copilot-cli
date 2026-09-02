@@ -273,6 +273,57 @@ def test_live_sse_parses_case_variant_tags():
     assert "".join(_content_pieces(payloads)) == ""
 
 
+def test_live_sse_two_complete_fences_emit_two_tool_calls():
+    deltas = [
+        '```tool_call\n{"name": "bash", "arguments": {"command": "ls"}}\n```\n',
+        '```tool_call\n{"name": "read", "arguments": {"path": "a.py"}}\n```',
+    ]
+    frames = list(
+        iter_live_sse(
+            completion_id="chatcmpl-two",
+            created=11,
+            model="default",
+            deltas=iter(deltas),
+            watch_tools=True,
+            allowed_tool_names={"bash", "read"},
+        )
+    )
+    payloads = _parse_sse(frames)
+    tool_names = [
+        p["choices"][0]["delta"]["tool_calls"][0]["function"]["name"]
+        for p in payloads
+        if isinstance(p, dict) and "tool_calls" in p["choices"][0]["delta"]
+    ]
+
+    assert tool_names == ["bash", "read"]
+    assert payloads[-2]["choices"][0]["finish_reason"] == "tool_calls"
+    assert payloads[-1] == "[DONE]"
+
+
+def test_live_sse_incomplete_second_fence_finishes_stop():
+    deltas = [
+        '```tool_call\n{"name": "bash", "arguments": {"command": "ls"}}\n```\n',
+        '```tool_call\n{"name": "read", "arguments": {"path":',
+    ]
+    frames = list(
+        iter_live_sse(
+            completion_id="chatcmpl-partial",
+            created=12,
+            model="default",
+            deltas=iter(deltas),
+            watch_tools=True,
+            allowed_tool_names={"bash", "read"},
+        )
+    )
+    payloads = _parse_sse(frames)
+    tool_deltas = [
+        p for p in payloads if isinstance(p, dict) and "tool_calls" in p["choices"][0]["delta"]
+    ]
+
+    assert tool_deltas == []
+    assert payloads[-2]["choices"][0]["finish_reason"] == "stop"
+
+
 def test_streaming_completion_emits_finish_reason():
     frames = list(
         iter_streaming_completion(

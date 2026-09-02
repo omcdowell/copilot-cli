@@ -194,6 +194,55 @@ def _trailing_tool_loop(messages: Sequence[Mapping[str, Any]]) -> list[Mapping[s
     return trailing
 
 
+def outstanding_tool_call_ids(messages: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Ids from the last trailing assistant message that issued tool_calls, in order."""
+    trailing = _trailing_tool_loop(messages)
+    for message in reversed(trailing):
+        if message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls") or ()
+        return [str(call["id"]) for call in tool_calls if call.get("id")]
+    return []
+
+
+def tool_result_ids(messages: Sequence[Mapping[str, Any]]) -> list[str]:
+    """tool_call_id values from trailing role=tool messages, in POST order."""
+    trailing = _trailing_tool_loop(messages)
+    return [
+        str(message["tool_call_id"])
+        for message in trailing
+        if message.get("role") == "tool" and message.get("tool_call_id")
+    ]
+
+
+def batch_ready(messages: Sequence[Mapping[str, Any]]) -> bool:
+    """True when trailing tool results cover the last assistant tool_calls set."""
+    outstanding = outstanding_tool_call_ids(messages)
+    if not outstanding:
+        return False
+    results = tool_result_ids(messages)
+    return set(results) == set(outstanding) and len(results) == len(outstanding)
+
+
+def _tool_results_in_call_order(
+    messages: Sequence[Mapping[str, Any]],
+    tool_results: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    by_id = {
+        str(message["tool_call_id"]): message
+        for message in tool_results
+        if message.get("tool_call_id")
+    }
+    ordered = [by_id[call_id] for call_id in outstanding_tool_call_ids(messages) if call_id in by_id]
+    seen = {str(message.get("tool_call_id", "")) for message in ordered}
+    extras = [
+        message
+        for message in tool_results
+        if str(message.get("tool_call_id", "")) not in seen
+    ]
+    return [*ordered, *extras]
+
+
 def build_continuation_prompt(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None = None,
@@ -216,7 +265,9 @@ def build_continuation_prompt(
     sections: list[str] = []
 
     if tool_results:
-        body = _join_sections(_format_message(message) for message in tool_results)
+        body = _join_sections(
+            _format_message(message) for message in _tool_results_in_call_order(messages, tool_results)
+        )
         if body:
             sections.append(body)
         if header:
